@@ -431,6 +431,51 @@ def get_html():
             width: 100px;
             vertical-align: middle;
         }
+
+        /* Progress bar — thin, always visible, clickable */
+        #progress-bar {
+            height: 3px;
+            background: rgba(200, 200, 200, 0.3);
+            cursor: pointer;
+            -webkit-app-region: no-drag;
+            position: relative;
+            flex-shrink: 0;
+        }
+
+        #progress-bar:hover {
+            height: 6px;
+        }
+
+        #progress-fill {
+            height: 100%;
+            background: rgba(76, 175, 80, 0.7);
+            width: 0%;
+            transition: width 0.2s;
+            pointer-events: none;
+        }
+
+        #progress-bar:hover #progress-fill {
+            background: rgba(76, 175, 80, 1);
+        }
+
+        #progress-tip {
+            display: none;
+            position: absolute;
+            bottom: 8px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.75);
+            color: #fff;
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 3px;
+            white-space: nowrap;
+            pointer-events: none;
+        }
+
+        #progress-bar:hover #progress-tip {
+            display: block;
+        }
     </style>
 </head>
 <body>
@@ -452,6 +497,10 @@ def get_html():
         <div id="text-display" onclick="togglePause()">
             <div id="text-content">右键点击打开电子书...</div>
         </div>
+        <div id="progress-bar" onclick="jumpToProgress(event)" onmousemove="showProgressTip(event)" onmouseleave="hideProgressTip()">
+            <div id="progress-fill"></div>
+            <div id="progress-tip">0%</div>
+        </div>
     </div>
 
     <script>
@@ -466,6 +515,7 @@ def get_html():
         let pageHeight = 0;
         let currentFile = '';
         let scrollFrame = 0;
+        let autoSaveInterval = null;
 
         function startScroll() {
             if (!content || isPaused || scrollFrame) return;
@@ -493,6 +543,7 @@ def get_html():
                 }
 
                 saveProgress();
+                updateProgressBar();
                 scrollFrame = requestAnimationFrame(scroll);
             }
         }
@@ -545,6 +596,7 @@ def get_html():
                 currentPage = Math.max(0, currentPage - 1);
                 updatePagePosition();
                 saveProgress();
+                updateProgressBar();
             }
         }
 
@@ -553,6 +605,7 @@ def get_html():
                 currentPage = Math.min(totalPages - 1, currentPage + 1);
                 updatePagePosition();
                 saveProgress();
+                updateProgressBar();
             }
         }
 
@@ -574,6 +627,62 @@ def get_html():
             }
         }
 
+        // --- Progress bar ---
+        function updateProgressBar() {
+            if (!content) return;
+            const textElement = document.getElementById('text-content');
+            const contentHeight = textElement.offsetHeight;
+            const displayHeight = document.getElementById('text-display').offsetHeight;
+            const maxScroll = Math.max(1, contentHeight - displayHeight);
+            const pct = Math.min(100, Math.max(0, (currentPosition / maxScroll) * 100));
+            document.getElementById('progress-fill').style.width = pct + '%';
+        }
+
+        function jumpToProgress(event) {
+            if (!content) return;
+            const bar = document.getElementById('progress-bar');
+            const rect = bar.getBoundingClientRect();
+            const pct = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+
+            const textElement = document.getElementById('text-content');
+            const contentHeight = textElement.offsetHeight;
+            const displayHeight = document.getElementById('text-display').offsetHeight;
+            const maxScroll = Math.max(0, contentHeight - displayHeight);
+
+            currentPosition = pct * maxScroll;
+            textElement.style.transform = `translateY(-${currentPosition}px)`;
+
+            if (!isAutoMode) {
+                updatePageInfo();
+                currentPage = Math.floor(currentPosition / pageHeight);
+            }
+            saveProgress();
+            updateProgressBar();
+        }
+
+        function showProgressTip(event) {
+            if (!content) return;
+            const bar = document.getElementById('progress-bar');
+            const rect = bar.getBoundingClientRect();
+            const pct = Math.max(0, Math.min(100, ((event.clientX - rect.left) / rect.width) * 100));
+            const tip = document.getElementById('progress-tip');
+            tip.textContent = Math.round(pct) + '%';
+        }
+
+        function hideProgressTip() {
+            // tip hides via CSS :hover on parent
+        }
+
+        // --- Auto-save every 5 seconds ---
+        function startAutoSave() {
+            if (autoSaveInterval) clearInterval(autoSaveInterval);
+            autoSaveInterval = setInterval(() => {
+                if (currentFile && content) {
+                    saveProgress();
+                }
+            }, 5000);
+        }
+
         function openFile() {
             pywebview.api.open_file().then(result => {
                 if (result.success) {
@@ -585,6 +694,9 @@ def get_html():
 
                     document.getElementById('text-content').textContent = content;
                     document.getElementById('text-content').style.transform = `translateY(-${currentPosition}px)`;
+
+                    updateProgressBar();
+                    startAutoSave();
 
                     if (isAutoMode) {
                         startScroll();
@@ -599,6 +711,7 @@ def get_html():
         }
 
         function closeApp() {
+            if (autoSaveInterval) clearInterval(autoSaveInterval);
             saveProgress();
             pywebview.api.close();
         }
