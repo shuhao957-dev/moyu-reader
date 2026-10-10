@@ -1,5 +1,9 @@
 import webview
 import sys
+import os
+import subprocess
+import tempfile
+import urllib.request
 from pathlib import Path
 import json
 import ebooklib
@@ -147,6 +151,135 @@ class BookReader:
             return {'success': False, 'error': '不支持的文件格式'}
 
         return {'success': False, 'error': '未选择文件'}
+
+
+# ---------------------------------------------------------------------------
+# Dependency self-check: auto-install WebView2 / .NET if missing
+# ---------------------------------------------------------------------------
+
+def _is_webview2_installed():
+    """Check if WebView2 runtime is installed via Windows registry."""
+    try:
+        import winreg
+        for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+            for wow64 in ('', 'WOW6432Node\\'):
+                try:
+                    key = winreg.OpenKey(
+                        root,
+                        rf'SOFTWARE\{wow64}Microsoft\EdgeUpdate\Clients'
+                        r'\{F3017226-FE2A-4295-8BEB-3A2F0F6B5A7B}',
+                    )
+                    winreg.CloseKey(key)
+                    return True
+                except (FileNotFoundError, OSError):
+                    continue
+    except ImportError:
+        pass
+    return False
+
+
+def _is_dotnet8_desktop_installed():
+    """Check if .NET 8 Desktop Runtime is installed (optional, for transparency)."""
+    try:
+        result = subprocess.run(
+            ['dotnet', '--list-runtimes'],
+            capture_output=True, text=True, timeout=5,
+            creationflags=0x08000000,  # CREATE_NO_WINDOW
+        )
+        return 'Microsoft.WindowsDesktop.App 8.' in result.stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def _get_exe_dir():
+    """Get directory of the running exe or script."""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _msg_box(text, title='摸鱼阅读器', icon=0x40):
+    """Show a Windows message box. icon: 0x10=error 0x30=warn 0x40=info 0x20=question"""
+    import ctypes as _ct
+    _ct.windll.user32.MessageBoxW(0, text, title, icon)
+
+
+def _run_installer_elevated(installer_path):
+    """Run an installer with UAC elevation via PowerShell. Returns True on success."""
+    try:
+        # PowerShell Start-Process -Verb RunAs handles UAC; -Wait blocks until done
+        cmd = (
+            f'powershell -ExecutionPolicy Bypass -Command '
+            f'"Start-Process -FilePath \'{installer_path}\' -Verb RunAs -Wait"'
+        )
+        subprocess.run(
+            cmd, shell=True, timeout=180,
+            creationflags=0x08000000,  # CREATE_NO_WINDOW — hide PS console flash
+        )
+        return True
+    except subprocess.TimeoutExpired:
+        return False
+    except Exception:
+        return False
+
+
+def ensure_dependencies():
+    """Check and auto-install missing dependencies. Returns True if OK to proceed."""
+    import ctypes as _ct
+
+    # --- WebView2 (required) ---
+    if not _is_webview2_installed():
+        exe_dir = _get_exe_dir()
+        local_installer = os.path.join(exe_dir, 'MicrosoftEdgeWebview2Setup.exe')
+
+        if os.path.exists(local_installer):
+            installer = local_installer
+        else:
+            # No local installer — ask to download from Microsoft
+            result = _ct.windll.user32.MessageBoxW(
+                0,
+                '摸鱼阅读器需要 WebView2 运行时才能运行。\n\n'
+                '点击「确定」自动下载安装（约 2MB，需要网络）\n'
+                '点击「取消」退出程序',
+                '摸鱼阅读器',
+                0x31,  # MB_OKCANCEL | MB_ICONQUESTION
+            )
+            if result != 1:  # not IDOK
+                return False
+
+            try:
+                installer = os.path.join(
+                    tempfile.gettempdir(), 'MicrosoftEdgeWebview2Setup.exe'
+                )
+                urllib.request.urlretrieve(
+                    'https://go.microsoft.com/fwlink/p/?LinkId=2124703',
+                    installer,
+                )
+            except Exception as e:
+                _msg_box(
+                    f'下载失败：{e}\n\n请手动安装 WebView2 后重试。',
+                    icon=0x10,
+                )
+                return False
+
+        # Run installer (with UAC elevation if needed)
+        _run_installer_elevated(installer)
+
+        # Verify installation
+        if not _is_webview2_installed():
+            _msg_box(
+                'WebView2 安装似乎未成功。\n'
+                '阅读器仍将尝试启动，但可能无法正常工作。',
+                icon=0x30,  # MB_ICONWARNING
+            )
+
+    # --- .NET 8 Desktop Runtime (optional — only for transparency) ---
+    if not _is_dotnet8_desktop_installed():
+        # Already handled gracefully by enable_windows_transparency's try/except.
+        # Just leave a quiet note; no blocking dialog.
+        print('[摸鱼阅读器] .NET 8 Desktop Runtime 未安装，透明背景不可用（不影响阅读）')
+
+    return True
 
 
 def enable_windows_transparency(window):
@@ -560,6 +693,8 @@ def create_reader_window(api):
 
 
 if __name__ == '__main__':
+    if not ensure_dependencies():
+        sys.exit(0)
     api = BookReader()
     window = create_reader_window(api)
     webview.start()
