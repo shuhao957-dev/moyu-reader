@@ -60,8 +60,27 @@ class BookReader:
             pass
 
     def get_progress(self, file_path):
-        """获取阅读进度"""
-        return self.progress.get(file_path, 0)
+        """获取阅读进度。先查全路径，再回退短文件名（兼容旧数据）"""
+        pos = self.progress.get(file_path, None)
+        if pos is not None:
+            return pos
+        # Fallback: old versions stored progress under short filename
+        short_name = Path(file_path).name
+        pos = self.progress.get(short_name, 0)
+        if pos > 0:
+            # Migrate old entry to full path key
+            self.progress[file_path] = pos
+            del self.progress[short_name]
+            self._save_progress_sync()
+        return pos
+
+    def _save_progress_sync(self):
+        """Internal: flush progress dict to disk immediately"""
+        try:
+            with open(self.progress_file, 'w', encoding='utf-8') as f:
+                json.dump(self.progress, f, indent=4, ensure_ascii=False)
+        except:
+            pass
 
     def get_config(self):
         return self.config
@@ -142,15 +161,17 @@ class BookReader:
             if ext == '.txt':
                 if self.load_txt(file_path):
                     saved_position = self.get_progress(file_path)
-                    return {'success': True, 'content': self.content, 'filename': Path(file_path).name, 'position': saved_position}
+                    return {'success': True, 'content': self.content, 'filename': Path(file_path).name, 'filepath': file_path, 'position': saved_position}
             elif ext == '.epub':
                 if self.load_epub(file_path):
                     saved_position = self.get_progress(file_path)
-                    return {'success': True, 'content': self.content, 'filename': Path(file_path).name, 'position': saved_position}
+                    return {'success': True, 'content': self.content, 'filename': Path(file_path).name, 'filepath': file_path, 'position': saved_position}
 
             return {'success': False, 'error': '不支持的文件格式'}
 
         return {'success': False, 'error': '未选择文件'}
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -158,23 +179,44 @@ class BookReader:
 # ---------------------------------------------------------------------------
 
 def _is_webview2_installed():
-    """Check if WebView2 runtime is installed via Windows registry."""
+    """Check if WebView2 runtime is installed via Windows registry.
+
+    Microsoft has used multiple GUIDs for WebView2 over time.
+    We check all known ones + fall back to checking the DLL path.
+    """
+    # Known WebView2 Runtime GUIDs (varies by installer version/channel)
+    WEBVIEW2_GUIDS = [
+        '{F3017226-FE2A-4295-8BEB-3A2F0F6B5A7B}',  # Early Evergreen Standalone
+        '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',  # Current Evergreen Standalone
+    ]
     try:
         import winreg
         for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
             for wow64 in ('', 'WOW6432Node\\'):
-                try:
-                    key = winreg.OpenKey(
-                        root,
-                        rf'SOFTWARE\{wow64}Microsoft\EdgeUpdate\Clients'
-                        r'\{F3017226-FE2A-4295-8BEB-3A2F0F6B5A7B}',
-                    )
-                    winreg.CloseKey(key)
-                    return True
-                except (FileNotFoundError, OSError):
-                    continue
+                for guid in WEBVIEW2_GUIDS:
+                    try:
+                        key = winreg.OpenKey(
+                            root,
+                            rf'SOFTWARE\{wow64}Microsoft\EdgeUpdate\Clients\{guid}',
+                        )
+                        winreg.CloseKey(key)
+                        return True
+                    except (FileNotFoundError, OSError):
+                        continue
     except ImportError:
         pass
+
+    # Fallback: check if the EmbeddedFixedVersion DLL exists
+    import glob
+    dll_patterns = [
+        os.path.expandvars(r'%ProgramFiles(x86)%\Microsoft\EdgeWebView\Application\*\EmbeddedFixedVersion.dll'),
+        os.path.expandvars(r'%ProgramFiles%\Microsoft\EdgeWebView\Application\*\EmbeddedFixedVersion.dll'),
+        os.path.expandvars(r'%LocalAppData%\Microsoft\EdgeWebView\Application\*\EmbeddedFixedVersion.dll'),
+    ]
+    for pattern in dll_patterns:
+        if glob.glob(pattern):
+            return True
+
     return False
 
 
@@ -431,51 +473,6 @@ def get_html():
             width: 100px;
             vertical-align: middle;
         }
-
-        /* Progress bar — thin, always visible, clickable */
-        #progress-bar {
-            height: 3px;
-            background: rgba(200, 200, 200, 0.3);
-            cursor: pointer;
-            -webkit-app-region: no-drag;
-            position: relative;
-            flex-shrink: 0;
-        }
-
-        #progress-bar:hover {
-            height: 6px;
-        }
-
-        #progress-fill {
-            height: 100%;
-            background: rgba(76, 175, 80, 0.7);
-            width: 0%;
-            transition: width 0.2s;
-            pointer-events: none;
-        }
-
-        #progress-bar:hover #progress-fill {
-            background: rgba(76, 175, 80, 1);
-        }
-
-        #progress-tip {
-            display: none;
-            position: absolute;
-            bottom: 8px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: rgba(0, 0, 0, 0.75);
-            color: #fff;
-            font-size: 10px;
-            padding: 2px 6px;
-            border-radius: 3px;
-            white-space: nowrap;
-            pointer-events: none;
-        }
-
-        #progress-bar:hover #progress-tip {
-            display: block;
-        }
     </style>
 </head>
 <body>
@@ -497,10 +494,6 @@ def get_html():
         <div id="text-display" onclick="togglePause()">
             <div id="text-content">右键点击打开电子书...</div>
         </div>
-        <div id="progress-bar" onclick="jumpToProgress(event)" onmousemove="showProgressTip(event)" onmouseleave="hideProgressTip()">
-            <div id="progress-fill"></div>
-            <div id="progress-tip">0%</div>
-        </div>
     </div>
 
     <script>
@@ -513,7 +506,8 @@ def get_html():
         let currentPage = 0;
         let totalPages = 0;
         let pageHeight = 0;
-        let currentFile = '';
+        let currentFilePath = '';  // full path for progress tracking
+        let currentFile = '';      // short name for display
         let scrollFrame = 0;
         let autoSaveInterval = null;
 
@@ -542,8 +536,6 @@ def get_html():
                     }
                 }
 
-                saveProgress();
-                updateProgressBar();
                 scrollFrame = requestAnimationFrame(scroll);
             }
         }
@@ -596,7 +588,6 @@ def get_html():
                 currentPage = Math.max(0, currentPage - 1);
                 updatePagePosition();
                 saveProgress();
-                updateProgressBar();
             }
         }
 
@@ -605,7 +596,6 @@ def get_html():
                 currentPage = Math.min(totalPages - 1, currentPage + 1);
                 updatePagePosition();
                 saveProgress();
-                updateProgressBar();
             }
         }
 
@@ -622,62 +612,16 @@ def get_html():
         }
 
         function saveProgress() {
-            if (currentFile && content) {
-                pywebview.api.save_progress(currentFile, currentPosition);
+            if (currentFilePath && content) {
+                pywebview.api.save_progress(currentFilePath, currentPosition);
             }
-        }
-
-        // --- Progress bar ---
-        function updateProgressBar() {
-            if (!content) return;
-            const textElement = document.getElementById('text-content');
-            const contentHeight = textElement.offsetHeight;
-            const displayHeight = document.getElementById('text-display').offsetHeight;
-            const maxScroll = Math.max(1, contentHeight - displayHeight);
-            const pct = Math.min(100, Math.max(0, (currentPosition / maxScroll) * 100));
-            document.getElementById('progress-fill').style.width = pct + '%';
-        }
-
-        function jumpToProgress(event) {
-            if (!content) return;
-            const bar = document.getElementById('progress-bar');
-            const rect = bar.getBoundingClientRect();
-            const pct = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
-
-            const textElement = document.getElementById('text-content');
-            const contentHeight = textElement.offsetHeight;
-            const displayHeight = document.getElementById('text-display').offsetHeight;
-            const maxScroll = Math.max(0, contentHeight - displayHeight);
-
-            currentPosition = pct * maxScroll;
-            textElement.style.transform = `translateY(-${currentPosition}px)`;
-
-            if (!isAutoMode) {
-                updatePageInfo();
-                currentPage = Math.floor(currentPosition / pageHeight);
-            }
-            saveProgress();
-            updateProgressBar();
-        }
-
-        function showProgressTip(event) {
-            if (!content) return;
-            const bar = document.getElementById('progress-bar');
-            const rect = bar.getBoundingClientRect();
-            const pct = Math.max(0, Math.min(100, ((event.clientX - rect.left) / rect.width) * 100));
-            const tip = document.getElementById('progress-tip');
-            tip.textContent = Math.round(pct) + '%';
-        }
-
-        function hideProgressTip() {
-            // tip hides via CSS :hover on parent
         }
 
         // --- Auto-save every 5 seconds ---
         function startAutoSave() {
             if (autoSaveInterval) clearInterval(autoSaveInterval);
             autoSaveInterval = setInterval(() => {
-                if (currentFile && content) {
+                if (currentFilePath && content) {
                     saveProgress();
                 }
             }, 5000);
@@ -688,6 +632,7 @@ def get_html():
                 if (result.success) {
                     content = result.content;
                     currentFile = result.filename;
+                    currentFilePath = result.filepath;
                     currentPosition = result.position || 0;
                     isPaused = false;
                     lastTimestamp = 0;
@@ -695,7 +640,6 @@ def get_html():
                     document.getElementById('text-content').textContent = content;
                     document.getElementById('text-content').style.transform = `translateY(-${currentPosition}px)`;
 
-                    updateProgressBar();
                     startAutoSave();
 
                     if (isAutoMode) {
