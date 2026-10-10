@@ -473,6 +473,23 @@ def get_html():
             width: 100px;
             vertical-align: middle;
         }
+
+        /* Progress bar — minimal 3px, clickable for jump-to */
+        #progress-bar {
+            height: 3px;
+            background: rgba(180, 180, 180, 0.2);
+            cursor: pointer;
+            -webkit-app-region: no-drag;
+            position: relative;
+            flex-shrink: 0;
+        }
+
+        #progress-fill {
+            height: 100%;
+            background: rgba(76, 175, 80, 0.5);
+            width: 0%;
+            pointer-events: none;
+        }
     </style>
 </head>
 <body>
@@ -493,6 +510,9 @@ def get_html():
         </div>
         <div id="text-display" onclick="togglePause()">
             <div id="text-content">右键点击打开电子书...</div>
+        </div>
+        <div id="progress-bar" onclick="jumpToProgress(event)">
+            <div id="progress-fill"></div>
         </div>
     </div>
 
@@ -588,6 +608,7 @@ def get_html():
                 currentPage = Math.max(0, currentPage - 1);
                 updatePagePosition();
                 saveProgress();
+                updateProgressBar();
             }
         }
 
@@ -596,6 +617,7 @@ def get_html():
                 currentPage = Math.min(totalPages - 1, currentPage + 1);
                 updatePagePosition();
                 saveProgress();
+                updateProgressBar();
             }
         }
 
@@ -615,6 +637,39 @@ def get_html():
             if (currentFilePath && content) {
                 pywebview.api.save_progress(currentFilePath, currentPosition);
             }
+        }
+
+        // --- Progress bar (click to jump) ---
+        function updateProgressBar() {
+            if (!content) return;
+            const textElement = document.getElementById('text-content');
+            const contentHeight = textElement.offsetHeight;
+            const displayHeight = document.getElementById('text-display').offsetHeight;
+            const maxScroll = Math.max(1, contentHeight - displayHeight);
+            const pct = Math.min(100, Math.max(0, (currentPosition / maxScroll) * 100));
+            document.getElementById('progress-fill').style.width = pct + '%';
+        }
+
+        function jumpToProgress(event) {
+            if (!content) return;
+            const bar = document.getElementById('progress-bar');
+            const rect = bar.getBoundingClientRect();
+            const pct = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+
+            const textElement = document.getElementById('text-content');
+            const contentHeight = textElement.offsetHeight;
+            const displayHeight = document.getElementById('text-display').offsetHeight;
+            const maxScroll = Math.max(0, contentHeight - displayHeight);
+
+            currentPosition = pct * maxScroll;
+            textElement.style.transform = `translateY(-${currentPosition}px)`;
+
+            if (!isAutoMode) {
+                updatePageInfo();
+                currentPage = Math.floor(currentPosition / pageHeight);
+            }
+            saveProgress();
+            updateProgressBar();
         }
 
         // --- Auto-save every 5 seconds ---
@@ -640,6 +695,7 @@ def get_html():
                     document.getElementById('text-content').textContent = content;
                     document.getElementById('text-content').style.transform = `translateY(-${currentPosition}px)`;
 
+                    updateProgressBar();
                     startAutoSave();
 
                     if (isAutoMode) {
