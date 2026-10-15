@@ -113,18 +113,72 @@ class BookReader:
         self._reader_size = (width, height)
         return {'success': True, 'config': config}
 
+    @staticmethod
+    def _decode_score(s):
+        """给解码结果打分：常用字符（中文/中文标点/可打印ASCII）占比越高越好"""
+        if not s:
+            return 0.0
+        good = 0
+        for ch in s:
+            o = ord(ch)
+            if (0x4E00 <= o <= 0x9FFF      # CJK 统一表意文字
+                    or 0x3000 <= o <= 0x303F  # 中文标点
+                    or 0xFF00 <= o <= 0xFFEF  # 全角字符
+                    or 0x20 <= o <= 0x7E      # 可打印 ASCII
+                    or ch in '\n\r\t'):
+                good += 1
+        return good / len(s)
+
     def load_txt(self, file_path):
-        """加载TXT文件，自动检测编码"""
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                self.content = f.read()
-        except UnicodeDecodeError:
+        """加载TXT文件，自动检测编码（BOM优先，支持UTF-16/UTF-8/GB18030）。
+        任何编码问题都不会抛异常：最坏显示替换字符或乱码，而不是打不开。"""
+        with open(file_path, 'rb') as f:
+            raw = f.read()
+
+        # UTF-16 要求偶数字节；文件被截断多出 1 字节时先去掉
+        utf16_raw = raw[:-1] if len(raw) % 2 else raw
+
+        # BOM 信息（有 BOM 的文件优先按 BOM 编码严格解码）
+        bom_enc, bom_data = None, None
+        if raw.startswith(b'\xff\xfe') or raw.startswith(b'\xfe\xff'):
+            bom_enc, bom_data = 'utf-16', utf16_raw
+        elif raw.startswith(b'\xef\xbb\xbf'):
+            bom_enc, bom_data = 'utf-8-sig', raw
+
+        content = None
+        # 1. BOM 严格解码
+        if bom_enc:
             try:
-                with open(file_path, 'r', encoding='gbk') as f:
-                    self.content = f.read()
-            except:
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    self.content = f.read()
+                content = bom_data.decode(bom_enc)
+            except UnicodeDecodeError:
+                content = None
+
+        # 2. UTF-8 严格解码（无 BOM 或 BOM 解码失败时）
+        if content is None:
+            try:
+                content = raw.decode('utf-8')
+            except UnicodeDecodeError:
+                # 3. 竞争打分：GB18030 / UTF-16LE / UTF-16BE 谁解出来更"像中文"用谁
+                best = None
+                for enc, data in (('gb18030', raw), ('utf-16-le', utf16_raw), ('utf-16-be', utf16_raw)):
+                    try:
+                        text = data.decode(enc)
+                    except UnicodeDecodeError:
+                        continue
+                    score = self._decode_score(text)
+                    if best is None or score > best[0]:
+                        best = (score, text)
+                if best is not None and best[0] > 0.6:
+                    content = best[1]
+
+        # 4. 最终兜底（保证不抛异常）：有 BOM 就替换坏字符解码，否则忽略错误解码
+        if content is None:
+            try:
+                content = bom_data.decode(bom_enc, errors='replace') if bom_enc else raw.decode('utf-8', errors='ignore')
+            except (UnicodeDecodeError, ValueError):
+                content = raw.decode('utf-8', errors='ignore')
+
+        self.content = content
 
         self.content = '\n'.join(line.strip() for line in self.content.split('\n') if line.strip())
         self.current_file = file_path
@@ -651,7 +705,7 @@ def get_html():
                 } else {
                     alert(result.error || '打开文件失败');
                 }
-            });
+            }).catch(err => alert('打开文件出错：' + err));
         }
 
         function closeApp() {

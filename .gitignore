@@ -4,55 +4,33 @@ __pycache__/
 *$py.class
 *.so
 .Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
 
-# PyInstaller
-*.manifest
-*.spec
+# 构建环境与产物（exe 通过 GitHub Releases 分发）
+_build_venv/
+build/
+dist/
 
-# Virtual Environment
-venv/
-ENV/
-env/
+# 打包配置（.spec 需要入库，是复现 exe 的关键）
 
-# IDE
+# 本地备份文件（git 自带版本历史）
+*.bak_*
+*_backup.py
+*_old.py
+
+# 工作数据
+.workbuddy/
+
+# 电子书测试样本
+*.epub
+
+# 用户本地配置
+config.json
+
+# IDE / OS
 .vscode/
 .idea/
 *.swp
-*.swo
-*~
-
-# OS
 .DS_Store
 Thumbs.db
-
-# Backup files
-*_backup.py
-*_old.py
-reader_old_backup.py
-reader_new.py
-reader_v2.py
-test*.py
-minimal.py
-
-# Config (user-specific)
-config.json
-
-# Test files (but keep requirements.txt)
-!requirements.txt
-*.txt
-*.epub
+Desktop.ini
