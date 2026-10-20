@@ -27,6 +27,9 @@ dist/
 # 用户本地配置
 config.json
 
+# 仅作者本机使用的开发脚本（依赖本机 Python，入库会误导普通用户）
+启动摸鱼阅读器.bat
+
 # IDE / OS
 .vscode/
 .idea/
