@@ -224,14 +224,14 @@ def get_html():
             top: 0;
             right: 0;
             padding: 4px;
-            background: rgba(40, 40, 40, 0.78);
+            background: transparent;
             border-radius: 4px;
             font-size: 12px;
             -webkit-app-region: no-drag;
             z-index: 1000;
             opacity: 0;
             pointer-events: none;
-            transition: opacity 0.3s;
+            transition: opacity 0.5s;
         }
 
         #controls.show {
@@ -240,23 +240,30 @@ def get_html():
         }
 
         #controls button {
-            background: rgba(255, 255, 255, 0.14);
-            color: #f0f0f0;
-            border: 1px solid rgba(255, 255, 255, 0.28);
+            background: transparent;
+            color: #333;
+            border: none;
         }
 
         #controls button:hover {
-            background: rgba(255, 255, 255, 0.28);
+            background: transparent;
+            color: #000;
+            text-decoration: underline;
         }
 
         #controls button.active {
-            background: #4CAF50;
-            color: white;
-            border-color: #4CAF50;
+            background: transparent;
+            color: #388E3C;
+            border: none;
+            font-weight: bold;
         }
 
         #controls label {
-            color: #f0f0f0;
+            color: #333;
+        }
+
+        #controls input[type="range"] {
+            accent-color: #888;
         }
 
         #mode-indicator {
@@ -505,22 +512,26 @@ def get_html():
             }
         });
 
-        // Controls auto-hide: fade out after 2.5s of mouse inactivity.
-        // Hovering the panel itself keeps it visible; any mouse movement brings it back.
+        // Controls auto-hide: show on window entry, fade out after 3s.
+        // Mouse movement inside the window does NOT re-trigger the panel;
+        // only leaving the window and re-entering does.
         const controlsEl = document.getElementById('controls');
         let controlsTimer = null;
         function showControls() {
             controlsEl.classList.add('show');
             if (controlsTimer) clearTimeout(controlsTimer);
-            controlsTimer = setTimeout(() => controlsEl.classList.remove('show'), 2500);
+            controlsTimer = setTimeout(() => controlsEl.classList.remove('show'), 3000);
+        }
+        function hideControls() {
+            if (controlsTimer) clearTimeout(controlsTimer);
+            controlsEl.classList.remove('show');
         }
         document.getElementById('container').addEventListener('mouseenter', showControls);
-        document.getElementById('container').addEventListener('mousemove', showControls);
+        document.getElementById('container').addEventListener('mouseleave', hideControls);
         controlsEl.addEventListener('mouseenter', () => {
-            if (controlsTimer) clearTimeout(controlsTimer);
-            controlsEl.classList.add('show');
+            if (controlsTimer) clearTimeout(controlsTimer);  // hovering the panel: stay visible
         });
-        controlsEl.addEventListener('mouseleave', showControls);
+        controlsEl.addEventListener('mouseleave', showControls);  // leaving panel: restart countdown
 
         window.addEventListener('resize', () => {
             if (!isAutoMode) {
