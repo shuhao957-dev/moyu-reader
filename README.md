@@ -9,20 +9,20 @@
 > ⚠️ **不要**点击仓库页面上绿色的 "Code → Download ZIP" —— 那是**源码**，不是软件。
 > 里面没有可运行的 exe，直接运行其中的脚本会报错（例如"Windows 找不到文件 Pythonw"）。
 
-当前推荐版本：**[v2.1.2](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1.2)**
-（修复了部分 TXT 文件乱码、以及个别文件打开无反应的问题）
+当前推荐版本：**[v2.1.3](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1.3)**
+（含 TXT 编码修复、按键面板自动隐藏等全部更新）
 
 提供两个版本，功能相同，区别仅在界面：
 
-| | 隐匿版 (v2.1.2) | 进度条版 (v2.1-bar) |
+| | 隐匿版 (v2.1.3) | 进度条版 (v2.1-bar) |
 |---|---|---|
 | 界面 | 纯净，零多余元素 | 底部 3px 半透明进度条 |
 | 点击跳转 | 无 | 点击进度条跳转到任意位置 |
 | 适合场景 | 上班摸鱼（最隐蔽） | 长篇小说需要来回翻阅 |
-| 下载 | [v2.1.2 Release](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1.2) | [v2.1-bar Release](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1-bar)（旧版，未含 v2.1.2 修复） |
+| 下载 | [v2.1.3 Release](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1.3) | [v2.1-bar Release](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1-bar)（旧版，未含 v2.1.2/v2.1.3 修复） |
 | 源码 | `main` 分支 | `progress-bar` 分支 |
 
-v2.1.2 Release 包含 3 个文件，放同一目录即可：
+v2.1.3 Release 包含 3 个文件，放同一目录即可：
 1. `MoyuReader.exe` — 主程序
 2. `MicrosoftEdgeWebview2Setup.exe` — WebView2 在线安装器（大多数 Win10/11 已自带 WebView2，缺了才需要；完全无外网的电脑请改用微软官网的离线安装包）
 3. `dotnet-desktop-runtime-8.0.22-win-x64.exe` — .NET 运行时（可选，仅透明背景需要）
@@ -65,7 +65,7 @@ python reader.py
 
 ```bash
 pip install pyinstaller
-pyinstaller MoyuReader_v2.1.2.spec
+pyinstaller MoyuReader_v2.1.3.spec
 ```
 
 ## 配置文件
