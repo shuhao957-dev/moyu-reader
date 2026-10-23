@@ -220,20 +220,43 @@ def get_html():
         }
 
         #controls {
-            display: none;
             position: fixed;
             top: 0;
             right: 0;
             padding: 4px;
-            background: rgba(255, 255, 255, 0.9);
+            background: rgba(40, 40, 40, 0.78);
             border-radius: 4px;
             font-size: 12px;
             -webkit-app-region: no-drag;
             z-index: 1000;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.3s;
         }
 
-        body:hover #controls {
-            display: block;
+        #controls.show {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        #controls button {
+            background: rgba(255, 255, 255, 0.14);
+            color: #f0f0f0;
+            border: 1px solid rgba(255, 255, 255, 0.28);
+        }
+
+        #controls button:hover {
+            background: rgba(255, 255, 255, 0.28);
+        }
+
+        #controls button.active {
+            background: #4CAF50;
+            color: white;
+            border-color: #4CAF50;
+        }
+
+        #controls label {
+            color: #f0f0f0;
         }
 
         #mode-indicator {
@@ -481,6 +504,23 @@ def get_html():
                 }
             }
         });
+
+        // Controls auto-hide: fade out after 2.5s of mouse inactivity.
+        // Hovering the panel itself keeps it visible; any mouse movement brings it back.
+        const controlsEl = document.getElementById('controls');
+        let controlsTimer = null;
+        function showControls() {
+            controlsEl.classList.add('show');
+            if (controlsTimer) clearTimeout(controlsTimer);
+            controlsTimer = setTimeout(() => controlsEl.classList.remove('show'), 2500);
+        }
+        document.getElementById('container').addEventListener('mouseenter', showControls);
+        document.getElementById('container').addEventListener('mousemove', showControls);
+        controlsEl.addEventListener('mouseenter', () => {
+            if (controlsTimer) clearTimeout(controlsTimer);
+            controlsEl.classList.add('show');
+        });
+        controlsEl.addEventListener('mouseleave', showControls);
 
         window.addEventListener('resize', () => {
             if (!isAutoMode) {
