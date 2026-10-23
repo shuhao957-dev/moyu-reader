@@ -22,10 +22,11 @@
 | 下载 | [v2.1.4 Release](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1.4) | [v2.1-bar Release](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1-bar)（旧版，未含 v2.1.2/v2.1.3 修复） |
 | 源码 | `main` 分支 | `progress-bar` 分支 |
 
-v2.1.4 Release 包含 3 个文件，放同一目录即可：
-1. `MoyuReader.exe` — 主程序
-2. `MicrosoftEdgeWebview2Setup.exe` — WebView2 在线安装器（大多数 Win10/11 已自带 WebView2，缺了才需要；完全无外网的电脑请改用微软官网的离线安装包）
-3. `dotnet-desktop-runtime-8.0.22-win-x64.exe` — .NET 运行时（可选，仅透明背景需要）
+**一般只需要下载 1 个文件：`MoyuReader.exe`** — 主程序自带全部运行时，双击即用。
+
+另外 2 个文件是备用件，**只有运行 exe 弹出缺少运行时的提示时才需要下载**：
+- `MicrosoftEdgeWebview2Setup.exe` — WebView2 在线安装器（绝大多数 Win10/11 已自带，无需理会；完全无外网的电脑请改用微软官网的离线安装包）
+- `dotnet-desktop-runtime-8.0.22-win-x64.exe` — .NET 运行时（可选，仅透明背景需要）
 
 ## 功能
 
