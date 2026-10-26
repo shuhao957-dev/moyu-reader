@@ -1,6 +1,8 @@
 import webview
 import sys
 import os
+import threading
+import time
 from pathlib import Path
 import json
 import ebooklib
@@ -14,6 +16,8 @@ class BookReader:
         self.progress_file = Path.home() / '.moyu_reader_progress.json'
         self.config_file = Path.home() / '.moyu_reader_config.json'
         self.progress = {}
+        self._window = None
+        self.sense = MouseSenseController(self)
         self.load_progress()
         self.load_config()
 
@@ -26,13 +30,19 @@ class BookReader:
             else:
                 self.config = {
                     'window': {'width': 400, 'height': 60, 'x': 100, 'y': 100},
-                    'speed': 50
+                    'speed': 50,
+                    'mouse_sense': False
                 }
         except:
             self.config = {
                 'window': {'width': 400, 'height': 60, 'x': 100, 'y': 100},
-                'speed': 50
+                'speed': 50,
+                'mouse_sense': False
             }
+
+    def sense_toggle(self):
+        """Ctrl+H 兜底开关：运行时切换鼠标感应模式（不写配置文件）"""
+        return self.sense.toggle()
 
     def load_progress(self):
         """加载阅读进度"""
@@ -169,6 +179,145 @@ class BookReader:
         return {'success': False, 'error': '未选择文件'}
 
 
+class MouseSenseController:
+    """鼠标感应模式：鼠标在窗口内 = 正常显示；离开超过 0.5 秒 = 窗口淡出 + 暂停滚动 + 点击穿透。
+    通过后台线程轮询全局鼠标坐标与窗口矩形判定，隐身（点击穿透）状态下仍能感知鼠标回来。"""
+
+    POLL_INTERVAL = 0.2
+    HIDE_DELAY = 0.5
+    RESUME_DELAY = 1.0
+
+    def __init__(self, reader):
+        self.reader = reader
+        self._window = None
+        self._hwnd = None
+        self._enabled = False
+        self._suspended = False
+        self._stop = threading.Event()
+        self._thread = None
+
+    @property
+    def enabled(self):
+        return self._enabled
+
+    def attach(self, window):
+        self._window = window
+        try:
+            self._hwnd = window.native.Handle.ToInt64()
+        except Exception:
+            self._hwnd = None
+
+    def set_enabled(self, enabled):
+        enabled = bool(enabled)
+        if enabled == self._enabled:
+            if not enabled:
+                self._force_visible()
+            return
+        if enabled:
+            self._enabled = True
+            self._suspended = False
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._loop, name='moyu-mouse-sense', daemon=True)
+            self._thread.start()
+        else:
+            self._enabled = False
+            self._suspended = False
+            self._stop.set()
+            t = self._thread
+            self._thread = None
+            if t is not None and t is not threading.current_thread():
+                t.join(timeout=2)
+            self._force_visible()
+
+    def suspend(self):
+        if not self._enabled:
+            return
+        self._suspended = True
+        self._force_visible()
+
+    def resume(self):
+        self._suspended = False
+
+    def toggle(self):
+        self.set_enabled(not self._enabled)
+        return self._enabled
+
+    def _force_visible(self):
+        self._set_click_through(False)
+        self._eval_js('moyuSenseShow()')
+
+    def _eval_js(self, code):
+        try:
+            if self._window is not None:
+                self._window.evaluate_js(code)
+        except Exception:
+            pass
+
+    def _set_click_through(self, on):
+        """给窗口加/去 WS_EX_TRANSPARENT：开启后鼠标点击穿到下层窗口"""
+        if sys.platform != 'win32' or not self._hwnd:
+            return
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            GWL_EXSTYLE = -20
+            WS_EX_LAYERED = 0x00080000
+            WS_EX_TRANSPARENT = 0x00000020
+            style = user32.GetWindowLongW(self._hwnd, GWL_EXSTYLE)
+            if on:
+                style |= WS_EX_TRANSPARENT | WS_EX_LAYERED
+            else:
+                style &= ~WS_EX_TRANSPARENT
+            user32.SetWindowLongW(self._hwnd, GWL_EXSTYLE, style)
+        except Exception:
+            pass
+
+    def _loop(self):
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        pt = wintypes.POINT()
+        rect = wintypes.RECT()
+        hidden = False
+        out_since = None
+        resume_at = None
+        while not self._stop.wait(self.POLL_INTERVAL):
+            try:
+                if self._suspended or not self._hwnd:
+                    if hidden:
+                        self._force_visible()
+                        hidden = False
+                    out_since = None
+                    resume_at = None
+                    continue
+                if not user32.GetCursorPos(ctypes.byref(pt)):
+                    continue
+                if not user32.GetWindowRect(self._hwnd, ctypes.byref(rect)):
+                    continue
+                inside = rect.left <= pt.x < rect.right and rect.top <= pt.y < rect.bottom
+                now = time.time()
+                if inside:
+                    out_since = None
+                    if hidden:
+                        self._set_click_through(False)
+                        self._eval_js('moyuSenseShow()')
+                        hidden = False
+                        resume_at = now + self.RESUME_DELAY
+                    elif resume_at is not None and now >= resume_at:
+                        self._eval_js('moyuSenseResume()')
+                        resume_at = None
+                else:
+                    resume_at = None
+                    if out_since is None:
+                        out_since = now
+                    elif not hidden and (now - out_since) >= self.HIDE_DELAY:
+                        self._eval_js('moyuSenseHide()')
+                        self._set_click_through(True)
+                        hidden = True
+            except Exception:
+                continue
+
+
 def get_html():
     """返回HTML内容"""
     return """
@@ -199,7 +348,13 @@ def get_html():
             display: flex;
             flex-direction: column;
             padding: 4px 8px;
+            transition: opacity 0.4s;
         }
+
+        /* 鼠标感应模式：隐身时整体淡出 */
+        body.sense-hidden #container { opacity: 0; }
+        body.sense-hidden #controls { display: none !important; }
+        body.sense-hidden #mode-indicator { display: none; }
 
         #text-display {
             flex: 1;
@@ -346,6 +501,10 @@ def get_html():
         let totalPages = 0;
         let pageHeight = 0;
         let currentFile = '';
+        // --- 鼠标感应模式状态（由 Python 端 MouseSenseController 驱动） ---
+        let senseHidden = false;
+        let sensePrevPaused = false;
+        let senseResumePending = false;
 
         function startScroll() {
             if (!content || isPaused) return;
@@ -406,6 +565,7 @@ def get_html():
         }
 
         function togglePause() {
+            senseResumePending = false;  // 手动/其他入口的暂停切换取消待恢复
             isPaused = !isPaused;
             const pauseBtn = document.getElementById('pause-btn');
             if (isPaused) {
@@ -480,6 +640,16 @@ def get_html():
         }
 
         document.addEventListener('keydown', (e) => {
+            if (e.ctrlKey && (e.key === 'h' || e.key === 'H')) {
+                e.preventDefault();
+                pywebview.api.sense_toggle().then(enabled => {
+                    const indicator = document.getElementById('mode-indicator');
+                    indicator.textContent = enabled ? '鼠标感应：开' : '鼠标感应：关';
+                    indicator.classList.add('show');
+                    setTimeout(() => indicator.classList.remove('show'), 1500);
+                }).catch(() => {});
+                return;
+            }
             if (e.key === 'Escape') {
                 closeApp();
             } else if (e.key === ' ') {
@@ -511,6 +681,28 @@ def get_html():
                 }
             }
         });
+
+        // --- 鼠标感应模式：由 Python 端 MouseSenseController 调用 ---
+        function moyuSenseHide() {
+            if (senseHidden) return;
+            senseHidden = true;
+            sensePrevPaused = isPaused;
+            senseResumePending = false;
+            if (!isPaused) togglePause();
+            hideControls();
+            document.body.classList.add('sense-hidden');
+        }
+        function moyuSenseShow() {
+            if (!senseHidden) return;
+            senseHidden = false;
+            senseResumePending = !sensePrevPaused;
+            document.body.classList.remove('sense-hidden');
+        }
+        function moyuSenseResume() {
+            if (senseHidden || !senseResumePending) return;
+            senseResumePending = false;
+            if (isPaused) togglePause();
+        }
 
         // Controls auto-hide: show on window entry, fade out after 3s.
         // Mouse movement inside the window does NOT re-trigger the panel;
@@ -565,5 +757,13 @@ if __name__ == '__main__':
         on_top=True,
         transparent=True
     )
+
+    api._window = window
+
+    def _on_shown():
+        api.sense.attach(window)
+        if api.config.get('mouse_sense'):
+            api.sense.set_enabled(True)
+    window.events.shown += _on_shown
 
     webview.start()

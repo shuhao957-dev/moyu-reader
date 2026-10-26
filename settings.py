@@ -13,38 +13,56 @@ def get_settings_html():
         inset: 0;
         z-index: 2000;
         overflow: auto;
-        padding: 16px;
+        padding: 12px;
         color: #333;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        background: #f7f7f8;
         -webkit-app-region: no-drag;
     }
     #moyu-settings .settings-card {
-        max-width: 500px;
+        max-width: 380px;
         margin: 0 auto;
-        padding: 20px;
+        padding: 14px 16px;
         background: white;
-        border-radius: 12px;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        border: 1px solid #e3e3e6;
+        border-radius: 8px;
+        box-shadow: 0 4px 14px rgba(0,0,0,0.08);
     }
-    #moyu-settings h1 { font-size: 20px; margin-bottom: 12px; }
-    #moyu-settings label { display: block; font-weight: bold; margin: 10px 0 4px; }
+    #moyu-settings h1 { font-size: 16px; margin: 0 0 8px; }
+    #moyu-settings label { display: block; font-weight: normal; font-size: 13px; margin: 8px 0 3px; }
+    #moyu-settings .check-row {
+        display: flex; align-items: center; gap: 8px;
+        font-weight: normal; font-size: 13px; margin: 10px 0 2px; cursor: pointer;
+    }
+    #moyu-settings .check-row input { width: auto; flex: none; }
+    #moyu-settings .check-hint { color: #888; font-size: 11px; margin: 2px 0 0 26px; }
+    #moyu-settings .mini-hint { color: #888; font-size: 11px; margin: 2px 0 0; }
     #moyu-settings input {
-        width: 100%; padding: 8px; font-size: 16px;
-        border: 1px solid #ccc; border-radius: 6px;
+        width: 100%; padding: 5px 7px; font-size: 13px;
+        border: 1px solid #ccc; border-radius: 5px;
         user-select: text;
     }
-    #moyu-settings .presets { display: flex; gap: 8px; margin-top: 8px; }
+    #moyu-settings input[type="color"] { padding: 2px; height: 30px; flex: 1; }
+    #moyu-settings input[type="range"] { padding: 0; accent-color: #666; }
+    #moyu-settings .presets { display: flex; gap: 6px; margin-top: 5px; }
     #moyu-settings button {
-        margin: 0; padding: 8px 12px; font-size: 14px;
-        border: 1px solid #ddd; border-radius: 6px; cursor: pointer;
+        margin: 0; padding: 5px 9px; font-size: 12px;
+        border: 1px solid #ddd; border-radius: 5px; cursor: pointer;
         background: #f3f4f8; color: #333;
     }
     #moyu-settings .presets button { flex: 1; }
-    #moyu-settings .actions { display: flex; gap: 10px; margin-top: 18px; }
+    #moyu-settings .inline-row { display: flex; gap: 6px; align-items: center; }
+    #moyu-settings .swatch {
+        width: 24px; height: 24px; padding: 0; flex: none;
+        border-radius: 5px; border: 1px solid #bbb;
+    }
+    #moyu-settings .opacity-row { display: flex; align-items: center; gap: 8px; }
+    #moyu-settings .opacity-row input { flex: 1; }
+    #moyu-settings .opacity-val { width: 42px; text-align: right; font-size: 12px; color: #555; flex: none; }
+    #moyu-settings .actions { display: flex; gap: 8px; margin-top: 12px; }
     #moyu-settings .actions button { flex: 1; }
-    #moyu-settings #settings-save { background: #667eea; border-color: #667eea; color: white; }
-    #moyu-settings .hint { margin-top: 12px; color: #777; font-size: 12px; }
-    #moyu-settings #settings-error { color: #b42318; margin-top: 10px; }
+    #moyu-settings #settings-save { background: #555b66; border-color: #555b66; color: white; }
+    #moyu-settings .hint { margin-top: 8px; color: #888; font-size: 11px; }
+    #moyu-settings #settings-error { color: #b42318; margin-top: 8px; font-size: 12px; }
 </style>
 <section id="moyu-settings" hidden aria-label="阅读设置">
     <form class="settings-card" id="settings-form">
@@ -65,12 +83,39 @@ def get_settings_html():
         </div>
         <label for="settings-speed">滚动速度</label>
         <input id="settings-speed" type="number" min="10" max="200" step="1" required>
+        <label for="settings-font-size">文字字号（px）</label>
+        <input id="settings-font-size" type="number" min="10" max="48" step="1" required>
+        <div class="presets">
+            <button type="button" onclick="setSetting('font-size', 12)">小 · 12</button>
+            <button type="button" onclick="setSetting('font-size', 16)">中 · 16</button>
+            <button type="button" onclick="setSetting('font-size', 22)">大 · 22</button>
+        </div>
+        <label for="settings-color">文字颜色</label>
+        <div class="inline-row">
+            <input id="settings-color" type="color" value="#333333">
+            <button type="button" class="swatch" style="background:#333333" title="深灰" onclick="setColor('#333333')"></button>
+            <button type="button" class="swatch" style="background:#000000" title="纯黑" onclick="setColor('#000000')"></button>
+            <button type="button" class="swatch" style="background:#1a5fb4" title="藏蓝" onclick="setColor('#1a5fb4')"></button>
+            <button type="button" class="swatch" style="background:#b33a3a" title="暗红" onclick="setColor('#b33a3a')"></button>
+        </div>
+        <label for="settings-opacity">文字不透明度（%）</label>
+        <div class="opacity-row">
+            <input id="settings-opacity" type="range" min="20" max="100" step="5" value="100"
+                   oninput="document.getElementById('settings-opacity-val').textContent = this.value + '%'">
+            <span class="opacity-val" id="settings-opacity-val">100%</span>
+        </div>
+        <p class="mini-hint">调低后文字变淡，可透出后面的工作内容。</p>
+        <label class="check-row" for="settings-mouse-sense">
+            <input id="settings-mouse-sense" type="checkbox">
+            鼠标感应模式
+        </label>
+        <p class="check-hint">开启后：鼠标离开窗口 0.5 秒自动隐藏并暂停滚动，点击可穿透到下层窗口；鼠标移回即恢复。Ctrl+H 可随时开关。</p>
         <p id="settings-error" role="alert"></p>
         <div class="actions">
             <button type="button" id="settings-cancel" onclick="closeSettings()">取消</button>
             <button type="submit" id="settings-save">保存并返回</button>
         </div>
-        <p class="hint">保存后立即生效。Ctrl+, 打开设置，Esc 返回阅读。</p>
+        <p class="hint">保存后立即生效。Esc 或点击空白处返回阅读，Ctrl+H 切换鼠标感应模式。</p>
     </form>
 </section>
 <script>
@@ -82,9 +127,17 @@ def get_settings_html():
     document.getElementById('moyu-settings').addEventListener('mousedown', (event) => {
         event.stopPropagation();
     });
+    // Escape hatch: clicking the blank area around the card closes settings.
+    document.getElementById('moyu-settings').addEventListener('click', (event) => {
+        if (event.target === document.getElementById('moyu-settings')) closeSettings();
+    });
 
     function setSetting(name, value) {
         document.getElementById('settings-' + name).value = value;
+    }
+
+    function setColor(color) {
+        document.getElementById('settings-color').value = color;
     }
 
     async function openSettings() {
@@ -98,6 +151,11 @@ def get_settings_html():
             setSetting('width', config.window.width);
             setSetting('height', config.window.height);
             setSetting('speed', scrollSpeed);
+            setSetting('font-size', config.font_size || 14);
+            document.getElementById('settings-color').value = config.text_color || '#333333';
+            document.getElementById('settings-opacity').value = config.text_opacity || 100;
+            document.getElementById('settings-opacity-val').textContent = (config.text_opacity || 100) + '%';
+            document.getElementById('settings-mouse-sense').checked = !!config.mouse_sense;
             document.getElementById('settings-error').textContent = '';
             document.body.classList.add('settings-open');
             document.getElementById('moyu-settings').hidden = false;
@@ -140,7 +198,11 @@ def get_settings_html():
             const result = await pywebview.api.apply_settings(
                 Number(document.getElementById('settings-width').value),
                 Number(document.getElementById('settings-height').value),
-                Number(document.getElementById('settings-speed').value)
+                Number(document.getElementById('settings-speed').value),
+                document.getElementById('settings-mouse-sense').checked,
+                Number(document.getElementById('settings-font-size').value),
+                document.getElementById('settings-color').value,
+                Number(document.getElementById('settings-opacity').value)
             );
             if (!result.success) {
                 document.getElementById('settings-error').textContent = result.message;
@@ -158,6 +220,7 @@ def get_settings_html():
     window.addEventListener('pywebviewready', async () => {
         const config = await pywebview.api.get_config();
         changeSpeed(config.speed);
+        applyFontStyle(config.font_size || 14, config.text_color || '#333333', config.text_opacity || 100);
     });
 </script>
     """

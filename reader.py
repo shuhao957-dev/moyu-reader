@@ -1,8 +1,11 @@
 import webview
 import sys
 import os
+import re
 import subprocess
 import tempfile
+import threading
+import time
 import urllib.request
 from pathlib import Path
 import json
@@ -21,8 +24,18 @@ class BookReader:
         self._window = None
         self._reader_size = None
         self.progress = {}
+        self.sense = MouseSenseController(self)
         self.load_progress()
         self.load_config()
+
+    DEFAULT_CONFIG = {
+        'window': {'width': 400, 'height': 60, 'x': 100, 'y': 100},
+        'speed': 50,
+        'mouse_sense': False,
+        'font_size': 14,
+        'text_color': '#333333',
+        'text_opacity': 100,
+    }
 
     def load_config(self):
         """加载配置文件"""
@@ -31,15 +44,12 @@ class BookReader:
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     self.config = json.load(f)
             else:
-                self.config = {
-                    'window': {'width': 400, 'height': 60, 'x': 100, 'y': 100},
-                    'speed': 50
-                }
+                self.config = self.DEFAULT_CONFIG
         except:
-            self.config = {
-                'window': {'width': 400, 'height': 60, 'x': 100, 'y': 100},
-                'speed': 50
-            }
+            self.config = self.DEFAULT_CONFIG
+        # 老配置文件补齐新增字段的默认值
+        for key, value in self.DEFAULT_CONFIG.items():
+            self.config.setdefault(key, value)
 
     def load_progress(self):
         """加载阅读进度"""
@@ -85,18 +95,61 @@ class BookReader:
     def get_config(self):
         return self.config
 
+    SETTINGS_SIZE = (420, 660)
+
+    @staticmethod
+    def _work_area():
+        """屏幕工作区（排除任务栏）。取不到时逐级退回：主屏尺寸 → 保守默认值。"""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            rect = wintypes.RECT()
+            if ctypes.windll.user32.SystemParametersInfoW(48, 0, ctypes.byref(rect), 0):
+                return rect.left, rect.top, rect.right, rect.bottom
+        except Exception:
+            pass
+        try:
+            import ctypes
+            sm = ctypes.windll.user32.GetSystemMetrics
+            return 0, 0, sm(0), sm(1)
+        except Exception:
+            return 0, 0, 1920, 1080
+
     def open_settings(self):
+        self.sense.suspend()  # 设置窗口打开期间暂停鼠标感应隐身
+        win = self._window
         if self._reader_size is None:
-            self._reader_size = (self._window.width, self._window.height)
-        self._window.resize(550, 600)
+            # 记录阅读时的位置和尺寸，关闭设置后原样恢复
+            self._reader_size = (win.x, win.y, win.width, win.height)
+        w, h = self.SETTINGS_SIZE
+        left, top, right, bottom = self._work_area()
+        # 把拉大后的设置窗口平移到工作区内，避免贴边时按钮被顶出屏幕
+        x = max(left, min(win.x, right - w))
+        y = max(top, min(win.y, bottom - h))
+        try:
+            win.resize(w, h)
+            win.move(x, y)
+        except Exception:
+            pass  # 拖不动也不影响：Esc/点空白仍可退出设置
         return self.config
 
     def close_settings(self):
+        self.sense.resume()
         if self._reader_size is not None:
-            self._window.resize(*self._reader_size)
+            x, y, w, h = self._reader_size
+            try:
+                self._window.resize(w, h)
+                self._window.move(x, y)
+            except Exception:
+                pass
             self._reader_size = None
 
-    def apply_settings(self, width, height, speed):
+    def sense_toggle(self):
+        """Ctrl+H 兜底开关：运行时切换鼠标感应模式（不写配置文件）"""
+        return self.sense.toggle()
+
+    def apply_settings(self, width, height, speed, mouse_sense=None,
+                       font_size=None, text_color=None, text_opacity=None):
         try:
             width, height, speed = int(width), int(height), int(speed)
             if not (150 <= width <= 1200 and 20 <= height <= 600 and 10 <= speed <= 200):
@@ -104,13 +157,50 @@ class BookReader:
         except (TypeError, ValueError, OverflowError):
             return {'success': False, 'message': '宽度须为 150–1200，高度须为 20–600，速度须为 10–200。'}
 
-        config = {**self.config, 'window': {**self.config['window'], 'width': width, 'height': height}, 'speed': speed}
+        # 文字样式：未传参时保持现值（兼容旧调用方）
+        if font_size is None:
+            font_size = self.config.get('font_size', 14)
+        if text_color is None:
+            text_color = self.config.get('text_color', '#333333')
+        if text_opacity is None:
+            text_opacity = self.config.get('text_opacity', 100)
+        try:
+            font_size, text_opacity = int(font_size), int(text_opacity)
+            if not (10 <= font_size <= 48):
+                raise ValueError('字号')
+            if not (20 <= text_opacity <= 100):
+                raise ValueError('透明度')
+            if not (isinstance(text_color, str)
+                    and re.fullmatch(r'#[0-9a-fA-F]{6}', text_color)):
+                raise ValueError('颜色')
+        except (TypeError, ValueError, OverflowError):
+            return {'success': False, 'message': '字号须为 10–48，不透明度须为 20–100，颜色须为 #RRGGBB。'}
+
+        config = {**self.config,
+                  'window': {**self.config['window'], 'width': width, 'height': height},
+                  'speed': speed,
+                  'font_size': font_size,
+                  'text_color': text_color,
+                  'text_opacity': text_opacity}
+        if mouse_sense is not None:
+            config['mouse_sense'] = bool(mouse_sense)
         try:
             self.config_file.write_text(json.dumps(config, indent=4, ensure_ascii=False), encoding='utf-8')
         except OSError as error:
             return {'success': False, 'message': f'保存失败：{error}'}
         self.config = config
-        self._reader_size = (width, height)
+        if self._reader_size is not None:
+            # 设置面板开着时保存了新尺寸：更新待恢复的阅读窗口尺寸（位置不变）
+            self._reader_size = (*self._reader_size[:2], width, height)
+        if mouse_sense is not None and bool(mouse_sense) != self.sense.enabled:
+            self.sense.set_enabled(bool(mouse_sense))
+        # 文字样式立即生效
+        if self._window is not None:
+            try:
+                self._window.evaluate_js(
+                    f'applyFontStyle({font_size}, {json.dumps(text_color)}, {text_opacity})')
+            except Exception:
+                pass
         return {'success': True, 'config': config}
 
     @staticmethod
@@ -413,6 +503,156 @@ def enable_windows_transparency(window):
         print('[摸鱼阅读器] 提示: 安装 .NET Desktop Runtime 可启用透明背景效果')
 
 
+class MouseSenseController:
+    """鼠标感应模式：鼠标在窗口内 = 正常显示；离开超过 0.5 秒 = 窗口淡出 + 暂停滚动 + 点击穿透。
+
+    实现要点：
+    - 后台线程轮询全局鼠标坐标（GetCursorPos）与窗口矩形（GetWindowRect），
+      不依赖窗口自身接收鼠标事件，因此隐身（点击穿透）状态下仍能感知鼠标回来。
+    - 隐藏用"视觉隐身"（JS 淡出 + WS_EX_TRANSPARENT 点击穿透）而非 window.hide()，
+      避免窗口消失后无法再触发的死锁。
+    - 恢复滚动带 1 秒缓冲，防止鼠标路过窗口导致误触发。
+    """
+
+    POLL_INTERVAL = 0.2
+    HIDE_DELAY = 0.5
+    RESUME_DELAY = 1.0
+
+    def __init__(self, reader):
+        self.reader = reader
+        self._window = None
+        self._hwnd = None
+        self._enabled = False
+        self._suspended = False
+        self._stop = threading.Event()
+        self._thread = None
+
+    @property
+    def enabled(self):
+        return self._enabled
+
+    def attach(self, window):
+        """窗口 shown 后（GUI 线程）调用，缓存原生句柄供 win32 调用使用"""
+        self._window = window
+        try:
+            self._hwnd = window.native.Handle.ToInt64()
+        except Exception:
+            self._hwnd = None
+
+    def set_enabled(self, enabled):
+        enabled = bool(enabled)
+        if enabled == self._enabled:
+            if not enabled:
+                self._force_visible()
+            return
+        if enabled:
+            self._enabled = True
+            self._suspended = False
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._loop, name='moyu-mouse-sense', daemon=True)
+            self._thread.start()
+        else:
+            self._enabled = False
+            self._suspended = False
+            self._stop.set()
+            t = self._thread
+            self._thread = None
+            if t is not None and t is not threading.current_thread():
+                t.join(timeout=2)
+            self._force_visible()
+
+    def suspend(self):
+        """设置窗口打开等场景：强制可见并暂停隐身判定"""
+        if not self._enabled:
+            return
+        self._suspended = True
+        self._force_visible()
+
+    def resume(self):
+        self._suspended = False
+
+    def toggle(self):
+        self.set_enabled(not self._enabled)
+        return self._enabled
+
+    def _force_visible(self):
+        self._set_click_through(False)
+        self._eval_js('moyuSenseShow()')
+
+    def _eval_js(self, code):
+        try:
+            if self._window is not None:
+                self._window.evaluate_js(code)
+        except Exception:
+            pass  # 窗口关闭等竞态下静默失败
+
+    def _set_click_through(self, on):
+        """给窗口加/去 WS_EX_TRANSPARENT：开启后鼠标点击穿到下层窗口"""
+        if sys.platform != 'win32' or not self._hwnd:
+            return
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            GWL_EXSTYLE = -20
+            WS_EX_LAYERED = 0x00080000
+            WS_EX_TRANSPARENT = 0x00000020
+            style = user32.GetWindowLongW(self._hwnd, GWL_EXSTYLE)
+            if on:
+                style |= WS_EX_TRANSPARENT | WS_EX_LAYERED
+            else:
+                style &= ~WS_EX_TRANSPARENT  # LAYERED 保留（透明背景依赖）
+            user32.SetWindowLongW(self._hwnd, GWL_EXSTYLE, style)
+        except Exception:
+            pass
+
+    def _loop(self):
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        pt = wintypes.POINT()
+        rect = wintypes.RECT()
+        hidden = False
+        out_since = None
+        resume_at = None
+        while not self._stop.wait(self.POLL_INTERVAL):
+            try:
+                if self._suspended or not self._hwnd:
+                    if hidden:
+                        self._force_visible()
+                        hidden = False
+                    out_since = None
+                    resume_at = None
+                    continue
+                if not user32.GetCursorPos(ctypes.byref(pt)):
+                    continue
+                if not user32.GetWindowRect(self._hwnd, ctypes.byref(rect)):
+                    continue
+                inside = rect.left <= pt.x < rect.right and rect.top <= pt.y < rect.bottom
+                now = time.time()
+                if inside:
+                    out_since = None
+                    if hidden:
+                        # 鼠标回来了：先关穿透再淡入，滚动等缓冲后恢复
+                        self._set_click_through(False)
+                        self._eval_js('moyuSenseShow()')
+                        hidden = False
+                        resume_at = now + self.RESUME_DELAY
+                    elif resume_at is not None and now >= resume_at:
+                        self._eval_js('moyuSenseResume()')
+                        resume_at = None
+                else:
+                    resume_at = None
+                    if out_since is None:
+                        out_since = now
+                    elif not hidden and (now - out_since) >= self.HIDE_DELAY:
+                        # 离开超过宽限期：JS 淡出+暂停，再开点击穿透
+                        self._eval_js('moyuSenseHide()')
+                        self._set_click_through(True)
+                        hidden = True
+            except Exception:
+                continue  # 单次轮询异常不终止线程
+
+
 def get_html():
     """返回HTML内容"""
     return """
@@ -443,7 +683,13 @@ def get_html():
             display: flex;
             flex-direction: column;
             padding: 4px 8px;
+            transition: opacity 0.4s;
         }
+
+        /* 鼠标感应模式：隐身时整体淡出，面板和模式指示完全消失 */
+        body.sense-hidden #container { opacity: 0; }
+        body.sense-hidden #controls { display: none !important; }
+        body.sense-hidden #mode-indicator { display: none; }
 
         #text-display {
             flex: 1;
@@ -594,6 +840,10 @@ def get_html():
         let currentFile = '';      // short name for display
         let scrollFrame = 0;
         let autoSaveInterval = null;
+        // --- 鼠标感应模式状态（由 Python 端 MouseSenseController 驱动） ---
+        let senseHidden = false;        // 当前是否处于感应隐身
+        let sensePrevPaused = false;    // 隐藏时的暂停状态（恢复依据）
+        let senseResumePending = false; // 淡入后是否待自动恢复滚动
 
         function startScroll() {
             if (!content || isPaused || scrollFrame) return;
@@ -654,6 +904,7 @@ def get_html():
         }
 
         function togglePause() {
+            senseResumePending = false;  // 任何手动/其他入口的暂停切换都取消待恢复
             isPaused = !isPaused;
             const pauseBtn = document.getElementById('pause-btn');
             if (isPaused) {
@@ -750,6 +1001,16 @@ def get_html():
                 openSettings();
                 return;
             }
+            if (e.ctrlKey && (e.key === 'h' || e.key === 'H')) {
+                e.preventDefault();
+                pywebview.api.sense_toggle().then(enabled => {
+                    const indicator = document.getElementById('mode-indicator');
+                    indicator.textContent = enabled ? '鼠标感应：开' : '鼠标感应：关';
+                    indicator.classList.add('show');
+                    setTimeout(() => indicator.classList.remove('show'), 1500);
+                }).catch(() => {});
+                return;
+            }
             if (settingsOpen) {
                 if (e.key === 'Escape') {
                     e.preventDefault();
@@ -793,6 +1054,40 @@ def get_html():
                 }
             }
         });
+
+        // --- 鼠标感应模式：由 Python 端 MouseSenseController 调用 ---
+        function moyuSenseHide() {
+            if (senseHidden) return;
+            senseHidden = true;
+            sensePrevPaused = isPaused;
+            senseResumePending = false;
+            if (!isPaused) togglePause();  // 隐藏时暂停滚动
+            hideControls();
+            document.body.classList.add('sense-hidden');
+        }
+        function moyuSenseShow() {
+            if (!senseHidden) return;
+            senseHidden = false;
+            senseResumePending = !sensePrevPaused;  // 之前在滚 → 淡入后待恢复
+            document.body.classList.remove('sense-hidden');
+        }
+        function moyuSenseResume() {
+            if (senseHidden || !senseResumePending) return;
+            senseResumePending = false;
+            if (isPaused) togglePause();  // 恢复滚动
+        }
+
+        // --- 文字样式（字号/颜色/不透明度，Python 端保存后调用或启动时初始化） ---
+        function applyFontStyle(size, color, opacity) {
+            const m = /^#?([0-9a-fA-F]{6})$/.exec(color || '');
+            if (!m) return;
+            const r = parseInt(m[1].slice(0, 2), 16);
+            const g = parseInt(m[1].slice(2, 4), 16);
+            const b = parseInt(m[1].slice(4, 6), 16);
+            const a = Math.min(1, Math.max(0.2, (Number(opacity) || 100) / 100));
+            document.body.style.fontSize = Number(size) + 'px';
+            document.body.style.color = 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+        }
 
         // Controls auto-hide: show on window entry, fade out after 3s.
         // Mouse movement inside the window does NOT re-trigger the panel;
@@ -849,7 +1144,13 @@ def create_reader_window(api):
     # before_show runs on the GUI thread after the native handle is available.
     window.events.before_show += enable_windows_transparency
     api._window = window
-    window.events.shown += lambda: window.resize(cfg['width'], cfg['height'])
+
+    def _on_shown():
+        window.resize(cfg['width'], cfg['height'])
+        api.sense.attach(window)
+        if api.config.get('mouse_sense'):
+            api.sense.set_enabled(True)
+    window.events.shown += _on_shown
     api.close = lambda: window.destroy()
     return window
 
