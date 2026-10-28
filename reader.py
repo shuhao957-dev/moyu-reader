@@ -99,7 +99,20 @@ class BookReader:
 
     @staticmethod
     def _work_area():
-        """屏幕工作区（排除任务栏）。取不到时逐级退回：主屏尺寸 → 保守默认值。"""
+        """屏幕工作区（排除任务栏/程序坞与菜单栏）。取不到时逐级退回：主屏尺寸 → 保守默认值。"""
+        if sys.platform == 'darwin':
+            try:
+                from AppKit import NSScreen
+                vf = NSScreen.mainScreen().visibleFrame()
+                sf = NSScreen.mainScreen().frame()
+                screen_h = sf.size.height
+                # AppKit 左下原点 → 左上原点（与 pywebview 的 move/x/y 一致）
+                return (vf.origin.x,
+                        screen_h - (vf.origin.y + vf.size.height),
+                        vf.origin.x + vf.size.width,
+                        screen_h - vf.origin.y)
+            except Exception:
+                return 0, 0, 1920, 1080
         try:
             import ctypes
             from ctypes import wintypes
@@ -411,6 +424,10 @@ def _run_installer_elevated(installer_path):
 
 def ensure_dependencies():
     """Check and auto-install missing dependencies. Returns True if OK to proceed."""
+    if sys.platform != 'win32':
+        # macOS：系统自带 WebKit 渲染内核（pywebview 直接可用），透明窗口原生支持，
+        # 无需 WebView2 / .NET Desktop Runtime，直接放行。
+        return True
     import ctypes as _ct
 
     # --- WebView2 (required) ---
@@ -587,7 +604,16 @@ class MouseSenseController:
             pass  # 窗口关闭等竞态下静默失败
 
     def _set_click_through(self, on):
-        """给窗口加/去 WS_EX_TRANSPARENT：开启后鼠标点击穿到下层窗口"""
+        """给窗口加/去点击穿透：开启后鼠标点击穿到下层窗口"""
+        if sys.platform == 'darwin':
+            # macOS：NSWindow.ignoresMouseEvents，原生属性直切
+            try:
+                native = getattr(self._window, 'native', None)
+                if native is not None:
+                    native.ignoresMouseEvents = bool(on)
+            except Exception:
+                pass
+            return
         if sys.platform != 'win32' or not self._hwnd:
             return
         try:
@@ -605,29 +631,55 @@ class MouseSenseController:
         except Exception:
             pass
 
+    def _win_probe(self):
+        """Windows：GetCursorPos 全局鼠标坐标 + GetWindowRect 窗口矩形"""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            pt = wintypes.POINT()
+            rect = wintypes.RECT()
+            if not self._hwnd:
+                return None
+            if not user32.GetCursorPos(ctypes.byref(pt)):
+                return None
+            if not user32.GetWindowRect(self._hwnd, ctypes.byref(rect)):
+                return None
+            return rect.left <= pt.x < rect.right and rect.top <= pt.y < rect.bottom
+        except Exception:
+            return None
+
+    def _mac_probe(self):
+        """macOS：NSEvent.mouseLocation 与 NSWindow.frame 同为屏幕坐标系（左下原点），直接比较"""
+        try:
+            from AppKit import NSEvent
+            native = getattr(self._window, 'native', None)
+            if native is None:
+                return None
+            loc = NSEvent.mouseLocation()
+            frame = native.frame()
+            return (frame.origin.x <= loc.x <= frame.origin.x + frame.size.width
+                    and frame.origin.y <= loc.y <= frame.origin.y + frame.size.height)
+        except Exception:
+            return None
+
     def _loop(self):
-        import ctypes
-        from ctypes import wintypes
-        user32 = ctypes.windll.user32
-        pt = wintypes.POINT()
-        rect = wintypes.RECT()
+        probe = self._mac_probe if sys.platform == 'darwin' else self._win_probe
         hidden = False
         out_since = None
         resume_at = None
         while not self._stop.wait(self.POLL_INTERVAL):
             try:
-                if self._suspended or not self._hwnd:
+                if self._suspended or (sys.platform == 'win32' and not self._hwnd):
                     if hidden:
                         self._force_visible()
                         hidden = False
                     out_since = None
                     resume_at = None
                     continue
-                if not user32.GetCursorPos(ctypes.byref(pt)):
+                inside = probe()
+                if inside is None:
                     continue
-                if not user32.GetWindowRect(self._hwnd, ctypes.byref(rect)):
-                    continue
-                inside = rect.left <= pt.x < rect.right and rect.top <= pt.y < rect.bottom
                 now = time.time()
                 if inside:
                     out_since = None
@@ -668,7 +720,7 @@ def get_html():
         }
 
         body {
-            font-family: "Microsoft YaHei", sans-serif;
+            font-family: "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", sans-serif;
             font-size: 14px;
             line-height: 1.6;
             color: #333;

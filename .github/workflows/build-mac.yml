@@ -1,0 +1,69 @@
+name: Build macOS
+
+on:
+  push:
+    branches: [mac]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pywebview ebooklib beautifulsoup4 pyinstaller
+
+      - name: Smoke test (import & platform branches)
+        run: |
+          python - <<'EOF'
+          import sys
+          assert sys.platform == 'darwin', 'should run on macOS runner'
+          import reader
+          # 平台分支静态检查：mac 探测/穿透函数存在，win32 入口不受影响
+          assert hasattr(reader.MouseSenseController, '_mac_probe')
+          assert hasattr(reader.MouseSenseController, '_win_probe')
+          assert reader.BookReader._work_area() is not None
+          print('smoke test OK, work_area =', reader.BookReader._work_area())
+          EOF
+
+      - name: Build app
+        run: pyinstaller --noconfirm MoyuReaderMac.spec
+
+      - name: Package app bundle
+        run: |
+          cd dist
+          ditto -c -k --sealSeg --keepParent MoyuReader.app MoyuReader-macOS-AppleSilicon.zip
+          ls -la
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MoyuReader-macOS-AppleSilicon
+          path: dist/MoyuReader-macOS-AppleSilicon.zip
+
+      - name: Attach to prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view v2.1.6-mac >/dev/null 2>&1 \
+            || gh release create v2.1.6-mac \
+                 --prerelease \
+                 --title "v2.1.6 macOS 测试版（Apple Silicon）" \
+                 --notes " macOS 测试版（实验性）：由 mac 分支云端自动构建。
+
+          **首次打开方法**：解压后得到 MoyuReader.app，**右键点击 → 打开**（绕过 Gatekeeper，因为未签名）。
+
+          - 适用：macOS 12+（Apple Silicon / M 系列）
+          - 功能同 Windows v2.1.6：透明悬浮阅读、自动滚动、文字样式、鼠标感应模式（Ctrl+H）
+          - 已知限制：未签名，首次打开需右键确认；Intel 芯片的老 Mac 暂不支持
+          - 遇到问题请提 Issue 反馈"
+          gh release upload v2.1.6-mac dist/MoyuReader-macOS-AppleSilicon.zip --clobber
