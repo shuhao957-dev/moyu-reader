@@ -41,7 +41,7 @@ jobs:
       - name: Package app bundle
         run: |
           cd dist
-          ditto -c -k --sealSeg --keepParent MoyuReader.app MoyuReader-macOS-AppleSilicon.zip
+          ditto -c -k --keepParent MoyuReader.app MoyuReader-macOS-AppleSilicon.zip
           ls -la
 
       - name: Upload artifact
