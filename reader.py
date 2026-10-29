@@ -298,7 +298,10 @@ class BookReader:
     def open_file(self):
         """打开文件对话框"""
         file_types = ('Text Files (*.txt)', 'EPUB Files (*.epub)', 'All Files (*.*)')
-        result = self._window.create_file_dialog(webview.FileDialog.OPEN, file_types=file_types)
+        # pywebview 4.x 用 webview.FileDialog.OPEN；3.6（Win7 构建）用 webview.OPEN_DIALOG
+        FileDialog = getattr(webview, 'FileDialog', None)
+        dialog_type = FileDialog.OPEN if FileDialog is not None else webview.OPEN_DIALOG
+        result = self._window.create_file_dialog(dialog_type, file_types=file_types)
 
         if result and len(result) > 0:
             file_path = result[0]
@@ -481,6 +484,29 @@ def ensure_dependencies():
         print('[摸鱼阅读器] .NET 8 Desktop Runtime 未安装，透明背景不可用（不影响阅读）')
 
     return True
+
+
+def _ensure_topmost():
+    """强制置顶（HWND_TOPMOST），绕开 pywebview 3.6.3 的 on_top 实现 bug。
+
+    3.6.3 的 winforms 后端两个坑叠加：
+    1) 创建窗口时不应用 on_top 参数（收了钱不办事）；
+    2) 即便事后赋值 window.on_top = True，其内部用 ctypes 裸 -1 传 HWND_TOPMOST，
+       64 位 Python 上会截断为 0xFFFFFFFF，系统不认，SetWindowPos 静默失败。
+    因此直接用 64 位完整的 HWND(-1) 调用（已实验验证：裸 -1 失败、HWND(-1) 成功）。
+    """
+    if sys.platform != 'win32':
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        hwnd = user32.FindWindowW(None, '摸鱼阅读器')
+        if hwnd:
+            SWP_NOSIZE, SWP_NOMOVE = 0x1, 0x2
+            user32.SetWindowPos(hwnd, wintypes.HWND(-1), 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE)
+    except Exception:
+        pass  # 置顶失败不影响其他功能
 
 
 def enable_windows_transparency(window):
@@ -1248,6 +1274,7 @@ def create_reader_window(api):
 
     def _on_shown():
         window.resize(cfg['width'], cfg['height'])
+        _ensure_topmost()
         api.sense.attach(window)
         # pywebview 3.6（Win7 构建）没有 before_show：shown 后补挂 DWM 透明
         enable_windows_transparency(window)
