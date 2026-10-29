@@ -131,6 +131,7 @@ class BookReader:
             win.move(x, y)
         except Exception:
             pass  # 拖不动也不影响：Esc/点空白仍可退出设置
+        enable_windows_transparency(self._window)  # resize 后重挂 DWM 透明（幂等）
         return self.config
 
     def close_settings(self):
@@ -143,6 +144,7 @@ class BookReader:
             except Exception:
                 pass
             self._reader_size = None
+            enable_windows_transparency(self._window)  # 同上，恢复后重挂
 
     def sense_toggle(self):
         """Ctrl+H 兜底开关：运行时切换鼠标感应模式（不写配置文件）"""
@@ -482,41 +484,85 @@ def ensure_dependencies():
 
 
 def enable_windows_transparency(window):
-    """Keep the WinForms host transparent when WebView2 resizes or restores.
-    Requires pythonnet + .NET Desktop Runtime. Falls back gracefully if unavailable."""
+    """Make the reader window a true transparent overlay that stays interactive.
+
+    Two host generations are handled:
+    - pywebview 6.x (main branch): window.native is the WinForms host.
+    - pywebview 3.6 (Win7 build): no window.native; resolve the HWND via
+      FindWindowW and get the Form back through Control.FromHandle.
+
+    The 3.6 host implements ``transparent=True`` with a color-key
+    (Form.BackColor = TransparencyKey = LimeGreen). Color-key pixels are
+    click-through by design, which kills right-click / drag on the whole
+    background — so the first job here is to dismantle the color key and
+    rebuild transparency with the DWM extended-frame recipe (negative margins
+    + black host = zero-alpha pixels), same as the main branch. Idempotent:
+    safe to call again after resizes. Falls back gracefully without pythonnet.
+    """
     if sys.platform != 'win32':
-        return
-    # pywebview 3.6（Win7 兼容构建）没有 renderer / native 属性：跳过 DWM 透明
-    renderer = getattr(webview, 'renderer', None)
-    if renderer is not None and renderer != 'edgechromium':
-        return
-    native = getattr(window, 'native', None)
-    if native is None:
-        print('[摸鱼阅读器] 当前 pywebview 版本不支持窗口透明，跳过（不影响使用）')
         return
 
     try:
         import ctypes
         from ctypes import wintypes
-        import clr
-        clr.AddReference('System.Drawing')
-        from System.Drawing import Color
+        user32 = ctypes.windll.user32
 
+        # --- 1) resolve the native HWND ---
+        hwnd = None
+        native = getattr(window, 'native', None)
+        if native is not None:
+            try:
+                hwnd = native.Handle.ToInt64()
+            except Exception:
+                hwnd = None
+        if not hwnd:
+            hwnd = user32.FindWindowW(None, '摸鱼阅读器')
+        if not hwnd:
+            print('[摸鱼阅读器] 未找到窗口句柄，跳过 DWM 透明（不影响使用）')
+            return
+
+        # --- 2) dismantle the color key from the .NET side and go black ---
+        # pywebview 6.x exposes the Form via window.native; pywebview 3.6
+        # (Win7 build) keeps it in BrowserView.instances keyed by window.uid.
+        form = native
+        if form is None:
+            try:
+                from webview.platforms.winforms import BrowserView
+                form = BrowserView.instances.get(getattr(window, 'uid', None))
+            except ImportError:
+                form = None
+        if form is not None:
+            import clr
+            clr.AddReference('System.Drawing')
+            from System.Drawing import Color
+            form.TransparencyKey = Color.Empty   # kill the LimeGreen color key
+            form.BackColor = Color.Black         # black host = zero-alpha for DWM
+            # WinForms recalculates window styles asynchronously after the
+            # property change; give it a moment before touching win32 styles.
+            time.sleep(0.3)
+
+        # --- 3) belt and braces: strip WS_EX_LAYERED at the win32 level ---
+        GWL_EXSTYLE = -20
+        WS_EX_LAYERED = 0x00080000
+        SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER, SWP_FRAMECHANGED = 0x1, 0x2, 0x4, 0x20
+        style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        if style & WS_EX_LAYERED:
+            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style & ~WS_EX_LAYERED)
+            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                                SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED)
+
+        # --- 4) DWM extended frame: negative margins cover the entire client
+        # area, including future resizes; black host pixels become transparent ---
         class Margins(ctypes.Structure):
             _fields_ = [(name, ctypes.c_int) for name in ('left', 'right', 'top', 'bottom')]
 
         extend_frame = ctypes.WinDLL('dwmapi').DwmExtendFrameIntoClientArea
         extend_frame.argtypes = [wintypes.HWND, ctypes.POINTER(Margins)]
         extend_frame.restype = ctypes.c_long
-
-        # Negative margins cover the entire client area, including future resizes.
-        # A black host supplies zero-alpha pixels to DWM; WebView2 still draws text
-        # and opaque controls normally. This is not a color-key transparency mask.
         margins = Margins(-1, -1, -1, -1)
-        result = extend_frame(native.Handle.ToInt64(), ctypes.byref(margins))
+        result = extend_frame(hwnd, ctypes.byref(margins))
         if result < 0:
             raise OSError(f'DwmExtendFrameIntoClientArea failed: 0x{result & 0xffffffff:08X}')
-        native.BackColor = Color.Black
     except (ImportError, OSError, Exception) as e:
         # pythonnet / .NET Desktop Runtime not available — transparency disabled,
         # but the reader still works perfectly without it.
@@ -525,13 +571,14 @@ def enable_windows_transparency(window):
 
 
 class MouseSenseController:
-    """鼠标感应模式：鼠标在窗口内 = 正常显示；离开超过 0.5 秒 = 窗口淡出 + 暂停滚动 + 点击穿透。
+    """鼠标感应模式：鼠标在窗口内 = 正常显示；离开超过 0.5 秒 = 窗口淡出 + 暂停滚动 + 整体移出屏幕。
 
     实现要点：
     - 后台线程轮询全局鼠标坐标（GetCursorPos）与窗口矩形（GetWindowRect），
-      不依赖窗口自身接收鼠标事件，因此隐身（点击穿透）状态下仍能感知鼠标回来。
-    - 隐藏用"视觉隐身"（JS 淡出 + WS_EX_TRANSPARENT 点击穿透）而非 window.hide()，
-      避免窗口消失后无法再触发的死锁。
+      不依赖窗口自身接收鼠标事件，因此窗口移出屏幕后仍能感知鼠标回来。
+    - 隐藏用"视觉淡出（JS）+ 物理移出屏幕（SetWindowPos）"而非点击穿透：
+      WS_EX_TRANSPARENT 在 pywebview 3.6 老栈上有样式残留 bug，且窗口悬停在
+      原处不可见也会挡住下层软件的点击——移出屏幕两个问题一起解决。
     - 恢复滚动带 1 秒缓冲，防止鼠标路过窗口导致误触发。
     """
 
@@ -547,6 +594,7 @@ class MouseSenseController:
         self._suspended = False
         self._stop = threading.Event()
         self._thread = None
+        self._stash_rect = None  # 隐藏时把窗口移出屏幕前记录的原位置
 
     @property
     def enabled(self):
@@ -605,7 +653,7 @@ class MouseSenseController:
         return self._enabled
 
     def _force_visible(self):
-        self._set_click_through(False)
+        self._restore_window()
         self._eval_js('moyuSenseShow()')
 
     def _eval_js(self, code):
@@ -615,22 +663,40 @@ class MouseSenseController:
         except Exception:
             pass  # 窗口关闭等竞态下静默失败
 
-    def _set_click_through(self, on):
-        """给窗口加/去 WS_EX_TRANSPARENT：开启后鼠标点击穿到下层窗口"""
+    def _stash_window(self):
+        """隐藏兜底：把窗口整体移出屏幕（不依赖点击穿透）。
+
+        色键透明已废、点击穿透在 3.6 老栈上有样式残留 bug，改用物理移出：
+        窗口不可见也不挡住下层软件的点击，鼠标回到原区域再移回。
+        """
         if sys.platform != 'win32' or not self._hwnd:
             return
         try:
             import ctypes
+            from ctypes import wintypes
             user32 = ctypes.windll.user32
-            GWL_EXSTYLE = -20
-            WS_EX_LAYERED = 0x00080000
-            WS_EX_TRANSPARENT = 0x00000020
-            style = user32.GetWindowLongW(self._hwnd, GWL_EXSTYLE)
-            if on:
-                style |= WS_EX_TRANSPARENT | WS_EX_LAYERED
-            else:
-                style &= ~WS_EX_TRANSPARENT  # LAYERED 保留（透明背景依赖）
-            user32.SetWindowLongW(self._hwnd, GWL_EXSTYLE, style)
+            rect = wintypes.RECT()
+            if not user32.GetWindowRect(self._hwnd, ctypes.byref(rect)):
+                return
+            self._stash_rect = (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
+            SWP_NOSIZE, SWP_NOZORDER, SWP_NOACTIVATE = 0x1, 0x4, 0x10
+            user32.SetWindowPos(self._hwnd, 0, -32000, -32000, 0, 0,
+                                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+        except Exception:
+            pass
+
+    def _restore_window(self):
+        """把移出屏幕的窗口放回原位置（幂等：未 stash 时无操作）"""
+        if sys.platform != 'win32' or not self._hwnd or not self._stash_rect:
+            return
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            x, y = self._stash_rect[0], self._stash_rect[1]
+            self._stash_rect = None
+            SWP_NOSIZE, SWP_NOZORDER, SWP_NOACTIVATE = 0x1, 0x4, 0x10
+            user32.SetWindowPos(self._hwnd, 0, x, y, 0, 0,
+                                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
         except Exception:
             pass
 
@@ -654,15 +720,20 @@ class MouseSenseController:
                     continue
                 if not user32.GetCursorPos(ctypes.byref(pt)):
                     continue
-                if not user32.GetWindowRect(self._hwnd, ctypes.byref(rect)):
-                    continue
-                inside = rect.left <= pt.x < rect.right and rect.top <= pt.y < rect.bottom
+                if self._stash_rect:
+                    # 窗口已移出屏幕：用移出前的矩形判定鼠标是否回到原区域
+                    sx, sy, sw, sh = self._stash_rect
+                    inside = sx <= pt.x < sx + sw and sy <= pt.y < sy + sh
+                else:
+                    if not user32.GetWindowRect(self._hwnd, ctypes.byref(rect)):
+                        continue
+                    inside = rect.left <= pt.x < rect.right and rect.top <= pt.y < rect.bottom
                 now = time.time()
                 if inside:
                     out_since = None
                     if hidden:
-                        # 鼠标回来了：先关穿透再淡入，滚动等缓冲后恢复
-                        self._set_click_through(False)
+                        # 鼠标回到原区域：先把窗口移回原位，再淡入，滚动缓冲后恢复
+                        self._restore_window()
                         self._eval_js('moyuSenseShow()')
                         hidden = False
                         resume_at = now + self.RESUME_DELAY
@@ -674,9 +745,9 @@ class MouseSenseController:
                     if out_since is None:
                         out_since = now
                     elif not hidden and (now - out_since) >= self.HIDE_DELAY:
-                        # 离开超过宽限期：JS 淡出+暂停，再开点击穿透
+                        # 离开超过宽限期：JS 淡出+暂停，窗口整体移出屏幕
                         self._eval_js('moyuSenseHide()')
-                        self._set_click_through(True)
+                        self._stash_window()
                         hidden = True
             except Exception:
                 continue  # 单次轮询异常不终止线程
@@ -1171,7 +1242,6 @@ def create_reader_window(api):
         transparent=True
     )
     # before_show runs on the GUI thread after the native handle is available.
-    # pywebview 3.6（Win7 兼容构建）没有 before_show 事件，届时跳过 DWM 透明挂载。
     if hasattr(window.events, 'before_show'):
         window.events.before_show += enable_windows_transparency
     api._window = window
@@ -1179,6 +1249,8 @@ def create_reader_window(api):
     def _on_shown():
         window.resize(cfg['width'], cfg['height'])
         api.sense.attach(window)
+        # pywebview 3.6（Win7 构建）没有 before_show：shown 后补挂 DWM 透明
+        enable_windows_transparency(window)
         if api.config.get('mouse_sense'):
             api.sense.set_enabled(True)
     window.events.shown += _on_shown
