@@ -904,9 +904,9 @@ def get_html():
         let scrollSpeed = 50;
         let lastTimestamp = 0;
         let isAutoMode = true;
-        let currentPage = 0;
-        let totalPages = 0;
-        let pageHeight = 0;
+        // 行对齐分页：页首永远落在文字行边界上（行高的整数倍），不再维护"固定页高切片"的页数概念。
+        // 窗口高度是用户随手调的，几乎不可能是行高整数倍；固定页高切片会把切缝处的一行腰斩成
+        // 两半（上一页半行 + 下一页半行），两半都读不出来，效果就是跳过了一行。
         let currentFilePath = '';  // full path for progress tracking
         let currentFile = '';      // short name for display
         let scrollFrame = 0;
@@ -958,20 +958,31 @@ def get_html():
                 modeBtn.textContent = '手动';
                 modeBtn.classList.remove('active');
                 indicator.textContent = '手动翻页';
-                updatePageInfo();
             }
 
             indicator.classList.add('show');
             setTimeout(() => indicator.classList.remove('show'), 1500);
         }
 
-        function updatePageInfo() {
-            if (!isAutoMode && content) {
-                pageHeight = document.getElementById('text-display').offsetHeight;
-                const contentHeight = document.getElementById('text-content').offsetHeight;
-                totalPages = Math.ceil(contentHeight / pageHeight);
-                currentPage = Math.floor(currentPosition / pageHeight);
-            }
+        // --- 行对齐分页的工具函数 ---
+        function getLineHeight() {
+            const el = document.getElementById('text-content');
+            const lh = parseFloat(getComputedStyle(el).lineHeight);
+            if (lh && lh > 4) return lh;
+            // 兜底：极老内核对无单位 line-height 可能返回 "normal"，按 CSS 定义 1.6 倍字号推算
+            const fs = parseFloat(getComputedStyle(el).fontSize) || 14;
+            return fs * 1.6;
+        }
+        function viewHeight() {
+            return document.getElementById('text-display').offsetHeight;
+        }
+        function contentHeight() {
+            return document.getElementById('text-content').offsetHeight;
+        }
+        // 把任意 y 回退对齐到行边界（所在行的行首；进度恢复用，最多回退一行，不跳内容）
+        function lineFloor(y) {
+            const lh = getLineHeight();
+            return Math.max(0, Math.floor(y / lh) * lh);
         }
 
         function togglePause() {
@@ -991,7 +1002,14 @@ def get_html():
 
         function pageUp() {
             if (!isAutoMode && content) {
-                currentPage = Math.max(0, currentPage - 1);
+                if (currentPosition <= 0) return;
+                const lh = getLineHeight();
+                // pageDown(floor) 的镜像逆映射(ceil)：当前首行成为上一页的页尾腰斩行，
+                // 再往上翻时它会完整重现——与下翻语义完全对称，来回翻页位置严格可逆
+                let target = Math.ceil((currentPosition - viewHeight()) / lh) * lh;
+                // 防御：视口不足一行时至少上翻一行
+                if (target >= currentPosition) target = currentPosition - lh;
+                currentPosition = Math.max(0, target);
                 updatePagePosition();
                 saveProgress();
             }
@@ -999,14 +1017,21 @@ def get_html():
 
         function pageDown() {
             if (!isAutoMode && content) {
-                currentPage = Math.min(totalPages - 1, currentPage + 1);
+                const lh = getLineHeight();
+                // 下一页起点 = 视口底部所在行的行首（floor）：页尾被截断的行完整重现于下页开头，
+                // 任何行都不会被跳过（ceil 会把腰斩行的下半截永远留在屏外，等于跳行）
+                let target = Math.floor((currentPosition + viewHeight()) / lh) * lh;
+                // 防御：视口不足一行时至少下翻一行
+                if (target <= currentPosition) target = currentPosition + lh;
+                // 剩余内容本页已显示完（下一页首行不存在）：到底，不再翻
+                if (target >= contentHeight()) return;
+                currentPosition = target;
                 updatePagePosition();
                 saveProgress();
             }
         }
 
         function updatePagePosition() {
-            currentPosition = currentPage * pageHeight;
             const textElement = document.getElementById('text-content');
             textElement.style.transform = `translateY(-${currentPosition}px)`;
         }
@@ -1044,15 +1069,17 @@ def get_html():
                     lastTimestamp = 0;
 
                     document.getElementById('text-content').textContent = content;
+                    // 手动模式：恢复进度时对齐到行边界——旧版本存的任意像素可能落在行中间，
+                    // floor 回退让首行完整重读（最多回退一行，绝不跳内容）；自动模式保持任意像素平滑续滚
+                    if (!isAutoMode) {
+                        currentPosition = lineFloor(currentPosition);
+                    }
                     document.getElementById('text-content').style.transform = `translateY(-${currentPosition}px)`;
 
                     startAutoSave();
 
                     if (isAutoMode) {
                         startScroll();
-                    } else {
-                        updatePageInfo();
-                        currentPage = Math.floor(currentPosition / pageHeight);
                     }
                 } else {
                     alert(result.error || '打开文件失败');
@@ -1216,9 +1243,10 @@ def get_html():
         controlsEl.addEventListener('mouseleave', showControls);  // leaving panel: restart countdown
 
         window.addEventListener('resize', () => {
-            if (!isAutoMode && !settingsOpen) {
-                updatePageInfo();
-                currentPage = Math.floor(currentPosition / pageHeight);
+            // 窗口尺寸或字号变化会改变行高，当前页首可能落在行中间：重新对齐（floor 回退，不跳行）
+            if (!isAutoMode && content && !settingsOpen) {
+                currentPosition = lineFloor(currentPosition);
+                updatePagePosition();
             }
         });
     </script>

@@ -63,7 +63,18 @@ def child_pids(root_pid):
     return children
 
 
+def notify_user():
+    """真实输入测试前告知用户让出鼠标（新规矩：自动化抢真实输入会和用户打架）。"""
+    MB_OK, MB_ICONINFORMATION = 0x0, 0x40
+    user32.MessageBoxW(0,
+        "即将进行真实鼠标拖动测试。\n\n"
+        "点击\"确定\"后，请把鼠标放开约 15 秒，测试全程会自动移动光标。\n"
+        "（测试有光标复核，中途动了鼠标只会导致该轮重试，不会误报）",
+        "摸鱼阅读器 - 自动化测试", MB_OK | MB_ICONINFORMATION)
+
+
 def main():
+    notify_user()
     proc = subprocess.Popen([EXE])
     try:
         hwnd = find_window()
