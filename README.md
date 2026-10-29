@@ -15,7 +15,7 @@
 |---|---|---|
 | Windows 10 / 11 | **[v2.1.7](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1.7)（正式版）** | 功能最全、维护最活跃 |
 | Windows 7（尤其长期不更新 / 内网机） | [v2.1.6-win7](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1.6-win7)（兼容版） | 独立维护的老技术栈，安装指引和已知限制见 [win7 分支说明](https://github.com/shuhao957-dev/moyu-reader/tree/win7) |
-| macOS | 实验版 | 尚无现成下载包，需自行构建，见 [mac 分支](https://github.com/shuhao957-dev/moyu-reader/tree/mac) |
+| macOS | 实验版 | [v2.1.6-mac](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1.6-mac)（Apple Silicon 构建包，未经充分实测）；Intel Mac 需自行构建，见 [mac 分支](https://github.com/shuhao957-dev/moyu-reader/tree/mac) |
 
 **当前推荐版本：[v2.1.7](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1.7)**
 （v2.1.6 全部功能 + 触摸屏/一体机拖动修复 + 翻页行对齐不再跳字，详见发布说明）
