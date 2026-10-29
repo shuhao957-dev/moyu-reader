@@ -28,6 +28,20 @@
 - `MicrosoftEdgeWebview2Setup.exe` — WebView2 在线安装器（绝大多数 Win10/11 已自带，无需理会；完全无外网的电脑请改用微软官网的离线安装包）
 - `dotnet-desktop-runtime-8.0.22-win-x64.exe` — .NET 运行时（可选，仅透明背景需要）
 
+## Windows 7 用户
+
+正式版不支持 Win7（启动报 `api-ms-win-core-path-l1-1-0.dll` 缺失属正常现象——新版 Python 运行时已放弃 Win7）。请改用专门的兼容版 **[v2.1.6-win7](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1.6-win7)**（源码见 [`win7` 分支](https://github.com/shuhao957-dev/moyu-reader/tree/win7)），按发布页"先跑后装"说明操作。
+
+兼容版在 Win7 上的常见问题：
+
+| 症状 | 解法 |
+|---|---|
+| WebView2 安装器报"未知安装程序错误" | 先右键 → 以管理员身份运行重试；仍失败多为长期未打补丁的 Win7 缺 SHA-2 签名支持：先装 KB4490628（重启）→ 再装 KB4474419（重启）→ 重跑 WebView2 安装器。两个补丁已附在 v2.1.6-win7 发布页（微软官方 MSU） |
+| 运行时提示缺少 WebView2 | 装 v2.1.6-win7 发布页的 WebView2 **109** 独立安装器（最新版已放弃 Win7，装了也没用） |
+| 运行 exe 闪退 / 报 .NET 相关错误 | 装 [.NET Framework 4.7.2](https://dotnet.microsoft.com/download/dotnet-framework/net472) |
+
+> Win7 版不支持透明背景（白底窗口），其余功能与正式版一致。前提补丁 KB4490628 / KB4474419 仅涉及系统签名验证与更新服务堆栈，不改变应用程序运行环境。
+
 ## 功能
 
 - **透明窗口** — 文字浮在桌面上，透过窗口能看到后面的内容
