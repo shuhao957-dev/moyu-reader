@@ -23,6 +23,10 @@ class BookReader:
         self.config_file = data_dir / '.moyu_reader_config.json'
         self._window = None
         self._reader_size = None
+        # 自研 pointer 拖动状态（取代 pywebview easy_drag）
+        self._drag_anchor = None   # (win_left, win_top, anchor_screen_x, anchor_screen_y, dpi_scale)
+        self._drag_hwnd = None
+        self._drag_lock = threading.Lock()
         self.progress = {}
         self.sense = MouseSenseController(self)
         self.load_progress()
@@ -147,6 +151,72 @@ class BookReader:
     def sense_toggle(self):
         """Ctrl+H 兜底开关：运行时切换鼠标感应模式（不写配置文件）"""
         return self.sense.toggle()
+
+    # ---------- 自研窗口拖动（pointer 事件链） ----------
+    # 背景：pywebview 的 easy_drag 只监听 mousedown/mousemove 且不做指针捕获，
+    # 在触摸屏一体机（合成鼠标事件不连续）和快速拖动（光标跑出小窗口导致
+    # mousemove 断流）场景下会"拖不动"。改为 JS 侧 pointer 事件 + setPointerCapture，
+    # 鼠标/触摸/触控笔统一走本链路，Python 侧用锚点式 SetWindowPos 移动。
+
+    @staticmethod
+    def _drag_scale(hwnd):
+        """窗口 DPI 缩放系数（JS screenX 是 DIP，win32 坐标是物理像素）"""
+        try:
+            import ctypes
+            dpi = ctypes.windll.user32.GetDpiForWindow(hwnd)
+            if dpi and dpi >= 96:
+                return dpi / 96.0
+        except Exception:
+            pass
+        return 1.0
+
+    def drag_begin(self, screen_x, screen_y):
+        """pointerdown：记录窗口当前原点与指针屏幕坐标作为拖动锚点"""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            win = self._window
+            if win is None:
+                return False
+            hwnd = win.native.Handle.ToInt64()
+            rect = wintypes.RECT()
+            if not ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                return False
+            self._drag_hwnd = hwnd
+            self._drag_anchor = (rect.left, rect.top,
+                                 float(screen_x), float(screen_y),
+                                 self._drag_scale(hwnd))
+            return True
+        except Exception:
+            return False
+
+    def drag_move(self, screen_x, screen_y):
+        """pointermove：按锚点把窗口挪到目标位置。
+        每次调用经 js_api 各起一个线程，故用非阻塞锁丢帧——锚点式计算丢帧无损。"""
+        anchor = self._drag_anchor
+        if anchor is None or self._drag_hwnd is None:
+            return False
+        if not self._drag_lock.acquire(False):
+            return False  # 上一帧还在搬，跳过本帧
+        try:
+            import ctypes
+            win_left, win_top, ax, ay, scale = anchor
+            x = int(win_left + (float(screen_x) - ax) * scale)
+            y = int(win_top + (float(screen_y) - ay) * scale)
+            SWP_NOSIZE, SWP_NOZORDER, SWP_NOACTIVATE = 0x0001, 0x0004, 0x0010
+            ctypes.windll.user32.SetWindowPos(
+                self._drag_hwnd, None, x, y, None, None,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)
+            return True
+        except Exception:
+            return False
+        finally:
+            self._drag_lock.release()
+
+    def drag_end(self):
+        """pointerup / pointercancel：结束拖动"""
+        self._drag_anchor = None
+        return True
 
     def apply_settings(self, width, height, speed, mouse_sense=None,
                        font_size=None, text_color=None, text_opacity=None):
@@ -676,6 +746,7 @@ def get_html():
             -webkit-app-region: drag;
             user-select: none;
             background: transparent;
+            touch-action: none; /* 触摸拖窗口不被浏览器滚动手势截胡（截胡会发 pointercancel） */
         }
 
         #container {
@@ -1055,6 +1126,40 @@ def get_html():
             }
         });
 
+        // --- 自研窗口拖动：pointer 事件（鼠标/触摸/触控笔通吃）+ 指针捕获 ---
+        // 取代 pywebview 的 easy_drag：其只监听 mousedown/mousemove 且无捕获，
+        // 触摸屏机器合成鼠标事件不连续、快速拖动光标跑出小窗口会断流，都会"拖不动"。
+        let moyuDragId = null;
+        function moyuDragApi(name, ...args) {
+            try {
+                if (window.pywebview && pywebview.api && pywebview.api[name]) {
+                    pywebview.api[name](...args).catch(() => {});
+                }
+            } catch (err) { /* 桥未就绪等竞态下静默 */ }
+        }
+        function moyuDragStop(e) {
+            if (e.pointerId !== moyuDragId) return;
+            moyuDragId = null;
+            moyuDragApi('drag_end');
+        }
+        document.addEventListener('pointerdown', (e) => {
+            if (moyuDragId !== null) return;          // 已有指针在拖（多指忽略）
+            if (e.button !== 0) return;               // 只认主键/触摸
+            // 仅真交互控件豁免（点击/滑杆自身要响应）；label、面板背景等照常可拖，
+            // 与旧 easy_drag "任何位置可拖"行为保持一致——控件面板被 mouseenter 唤起
+            // 覆盖在窗口上时，从其文字/空白处仍可拖动窗口
+            if (e.target.closest('button, input, select, textarea')) return;
+            moyuDragId = e.pointerId;
+            try { e.target.setPointerCapture(e.pointerId); } catch (err) {}
+            moyuDragApi('drag_begin', e.screenX, e.screenY);
+        });
+        document.addEventListener('pointermove', (e) => {
+            if (e.pointerId !== moyuDragId) return;
+            moyuDragApi('drag_move', e.screenX, e.screenY);
+        });
+        document.addEventListener('pointerup', moyuDragStop);
+        document.addEventListener('pointercancel', moyuDragStop);
+
         // --- 鼠标感应模式：由 Python 端 MouseSenseController 调用 ---
         function moyuSenseHide() {
             if (senseHidden) return;
@@ -1137,7 +1242,7 @@ def create_reader_window(api):
         min_size=(150, 20),
         resizable=False,
         frameless=True,
-        easy_drag=True,
+        easy_drag=False,  # 拖动由自研 pointer 事件链实现（见 drag_begin/drag_move/drag_end），覆盖鼠标/触摸/触控笔
         on_top=True,
         transparent=True
     )
