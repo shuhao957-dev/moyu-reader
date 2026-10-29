@@ -150,6 +150,12 @@ class BookReader:
         """Ctrl+H 兜底开关：运行时切换鼠标感应模式（不写配置文件）"""
         return self.sense.toggle()
 
+    def close(self):
+        """关闭窗口（必须定义为类方法：pywebview 3.6 的 js_api 桥只枚举
+        inspect.ismethod 的类方法，实例上挂的 lambda 前端看不见，调用即静默失败）"""
+        if self._window is not None:
+            self._window.destroy()
+
     def apply_settings(self, width, height, speed, mouse_sense=None,
                        font_size=None, text_color=None, text_opacity=None):
         try:
@@ -1281,7 +1287,8 @@ def create_reader_window(api):
         if api.config.get('mouse_sense'):
             api.sense.set_enabled(True)
     window.events.shown += _on_shown
-    api.close = lambda: window.destroy()
+    # api.close 已改为 ReaderAPI.close 类方法：3.6 的 js_api 桥只暴露类方法，
+    # 实例挂的 lambda 前端看不见（静默失败）
     return window
 
 
