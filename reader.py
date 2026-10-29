@@ -415,6 +415,19 @@ def ensure_dependencies():
 
     # --- WebView2 (required) ---
     if not _is_webview2_installed():
+        # Win7/8：微软新版 WebView2 运行时已放弃这些系统（Win7 支持止于 109 版），
+        # 自动下载会装上跑不起来的版本，改为指引用户手动装 109 版。
+        if sys.getwindowsversion() < (6, 2):
+            _msg_box(
+                '摸鱼阅读器需要 WebView2 运行时才能运行。\n\n'
+                '检测到当前是 Windows 7 系统。\n'
+                '请手动安装「WebView2 Runtime 109 版」\n'
+                '（微软支持 Win7 的最后版本，安装包见发布页附件），\n'
+                '安装完成后重新打开本程序。',
+                icon=0x30,  # MB_ICONWARNING
+            )
+            return False
+
         exe_dir = _get_exe_dir()
         local_installer = os.path.join(exe_dir, 'MicrosoftEdgeWebview2Setup.exe')
 
@@ -471,7 +484,15 @@ def ensure_dependencies():
 def enable_windows_transparency(window):
     """Keep the WinForms host transparent when WebView2 resizes or restores.
     Requires pythonnet + .NET Desktop Runtime. Falls back gracefully if unavailable."""
-    if sys.platform != 'win32' or webview.renderer != 'edgechromium':
+    if sys.platform != 'win32':
+        return
+    # pywebview 3.6（Win7 兼容构建）没有 renderer / native 属性：跳过 DWM 透明
+    renderer = getattr(webview, 'renderer', None)
+    if renderer is not None and renderer != 'edgechromium':
+        return
+    native = getattr(window, 'native', None)
+    if native is None:
+        print('[摸鱼阅读器] 当前 pywebview 版本不支持窗口透明，跳过（不影响使用）')
         return
 
     try:
@@ -492,10 +513,10 @@ def enable_windows_transparency(window):
         # A black host supplies zero-alpha pixels to DWM; WebView2 still draws text
         # and opaque controls normally. This is not a color-key transparency mask.
         margins = Margins(-1, -1, -1, -1)
-        result = extend_frame(window.native.Handle.ToInt64(), ctypes.byref(margins))
+        result = extend_frame(native.Handle.ToInt64(), ctypes.byref(margins))
         if result < 0:
             raise OSError(f'DwmExtendFrameIntoClientArea failed: 0x{result & 0xffffffff:08X}')
-        window.native.BackColor = Color.Black
+        native.BackColor = Color.Black
     except (ImportError, OSError, Exception) as e:
         # pythonnet / .NET Desktop Runtime not available — transparency disabled,
         # but the reader still works perfectly without it.
@@ -534,10 +555,18 @@ class MouseSenseController:
     def attach(self, window):
         """窗口 shown 后（GUI 线程）调用，缓存原生句柄供 win32 调用使用"""
         self._window = window
+        self._hwnd = None
         try:
             self._hwnd = window.native.Handle.ToInt64()
         except Exception:
             self._hwnd = None
+        if not self._hwnd:
+            # pywebview 3.6（Win7 兼容构建）无 native 属性：按窗口标题查找句柄
+            try:
+                import ctypes
+                self._hwnd = ctypes.windll.user32.FindWindowW(None, '摸鱼阅读器') or None
+            except Exception:
+                self._hwnd = None
 
     def set_enabled(self, enabled):
         enabled = bool(enabled)
@@ -1142,7 +1171,9 @@ def create_reader_window(api):
         transparent=True
     )
     # before_show runs on the GUI thread after the native handle is available.
-    window.events.before_show += enable_windows_transparency
+    # pywebview 3.6（Win7 兼容构建）没有 before_show 事件，届时跳过 DWM 透明挂载。
+    if hasattr(window.events, 'before_show'):
+        window.events.before_show += enable_windows_transparency
     api._window = window
 
     def _on_shown():
