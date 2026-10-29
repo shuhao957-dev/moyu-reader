@@ -9,17 +9,25 @@
 > ⚠️ **不要**点击仓库页面上绿色的 "Code → Download ZIP" —— 那是**源码**，不是软件。
 > 里面没有可运行的 exe，直接运行其中的脚本会报错（例如"Windows 找不到文件 Pythonw"）。
 
-当前推荐版本：**[v2.1.6](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1.6)**
-（含 TXT 编码修复、鼠标感应模式、文字样式个性化、设置窗口防出屏等全部更新）
+### 我该下哪个版本？（按系统对号入座）
 
-提供两个版本，功能相同，区别仅在界面：
+| 你的系统 | 推荐版本 | 说明 |
+|---|---|---|
+| Windows 10 / 11 | **[v2.1.7](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1.7)（正式版）** | 功能最全、维护最活跃 |
+| Windows 7（尤其长期不更新 / 内网机） | [v2.1.6-win7](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1.6-win7)（兼容版） | 独立维护的老技术栈，安装指引和已知限制见 [win7 分支说明](https://github.com/shuhao957-dev/moyu-reader/tree/win7) |
+| macOS | 实验版 | 尚无现成下载包，需自行构建，见 [mac 分支](https://github.com/shuhao957-dev/moyu-reader/tree/mac) |
 
-| | 隐匿版 (v2.1.6) | 进度条版 (v2.1-bar) |
+**当前推荐版本：[v2.1.7](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1.7)**
+（v2.1.6 全部功能 + 触摸屏/一体机拖动修复 + 翻页行对齐不再跳字，详见发布说明）
+
+### 同一系统下的两个界面版本
+
+| | 隐匿版 (v2.1.7) | 进度条版 (v2.1-bar) |
 |---|---|---|
 | 界面 | 纯净，零多余元素 | 底部 3px 半透明进度条 |
 | 点击跳转 | 无 | 点击进度条跳转到任意位置 |
 | 适合场景 | 上班摸鱼（最隐蔽） | 长篇小说需要来回翻阅 |
-| 下载 | [v2.1.6 Release](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1.6) | [v2.1-bar Release](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1-bar)（旧版，未含 v2.1.2/v2.1.3 修复） |
+| 下载 | [v2.1.7 Release](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1.7) | [v2.1-bar Release](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1-bar)（旧版，未含 v2.1.2 起的修复） |
 | 源码 | `main` 分支 | `progress-bar` 分支 |
 
 **一般只需要下载 1 个文件：`MoyuReader.exe`** — 主程序自带全部运行时，双击即用。
@@ -32,8 +40,9 @@
 
 - **透明窗口** — 文字浮在桌面上，透过窗口能看到后面的内容
 - **窗口置顶** — 始终在最上层
+- **任意位置拖动** — 鼠标 / 触摸屏 / 触控笔都能拖（v2.1.7 重构为指针捕获，快速拖动不断流）
 - **自动滚动** — 可调速度，像股票行情一样慢慢滚
-- **手动翻页** — 所有字母键 / 空格 / 回车 = 下一页（看起来像在打字）
+- **手动翻页** — 所有字母键 / 空格 / 回车 = 下一页（看起来像在打字）；v2.1.7 起行对齐翻页，窗口高度不是整行数也不会跳字
 - **鼠标感应模式** — 鼠标离开窗口自动隐藏并暂停滚动，点击可穿透到下层窗口，鼠标移回即恢复
 - **文字样式** — 字号 / 颜色 / 不透明度可调，调低不透明度可让文字透出后面的工作内容
 - **内置设置** — Ctrl+, 调整窗口大小、滚动速度和文字样式
