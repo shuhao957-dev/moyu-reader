@@ -28,6 +28,7 @@ class BookReader:
         self._drag_hwnd = None
         self._drag_lock = threading.Lock()
         self.progress = {}
+        self.chapters = []   # [{title, offset}]：目录面板数据（load 时扫描）
         self.sense = MouseSenseController(self)
         self.load_progress()
         self.load_config()
@@ -39,6 +40,8 @@ class BookReader:
         'font_size': 14,
         'text_color': '#333333',
         'text_opacity': 100,
+        'progress_bar': False,
+        'auto_mode': True,   # 上次使用的翻页模式（自动/手动），打开书时恢复
     }
 
     def load_config(self):
@@ -98,6 +101,152 @@ class BookReader:
 
     def get_config(self):
         return self.config
+
+    # ---------- v3.0 章节目录扫描（目录面板数据源） ----------
+    # 严格档：误判率极低，命中即信。
+    #   第X章/节/卷/回/部/集/篇（允许【】[] 包裹、允许冒号空格接标题）、
+    #   序章/楔子/引子/尾声等、番外、Chapter N、卷一/卷12 式（数字在后）。
+    # 行短（≤34字）才算标题，避免把正文里恰好以"第…"开头的长句误认成章节。
+    CHAPTER_TITLE_RE = re.compile(
+        r'^(?:[【\[]?第[零〇一二三四五六七八九十百千万两0-9]{1,14}[章节卷回部集篇][】\]]?'
+        r'|序章|序言|楔子|引子|尾声|终章|后记'
+        r'|番外.{0,12}'
+        r'|卷[零〇一二三四五六七八九十百千0-9]{1,6}(?![章节卷回部集篇])'
+        r'|Chapter\s*\d+)'
+        r'.{0,20}$'
+    )
+    # 宽松档：纯编号式章节（用户书库实测存在），必须整档通过分布校验才启用。
+    #   "1"/"12" 纯数字独立行、"一、标题"、"1. 标题"、"12 决战"、"三" 等。
+    CHAPTER_LOOSE_RE = re.compile(
+        r'^(?:'
+        r'\d{1,4}'                                   # 纯数字独立行
+        r'|\d{1,4}[、.．:：](?!\d)\s*.{0,24}'         # 数字+分隔符+标题（"1.5" 不算）
+        r'|\d{1,4}\s+.{1,24}'                        # 数字+空格+标题
+        r'|[零〇一二三四五六七八九十百千]{1,6}[、.．]\s*.{0,24}'
+        r'|[零〇一二三四五六七八九十百千]{1,6}'
+        r')$'
+    )
+    LOOSE_LINE_MAX = 30          # 宽松档行长度上限（严格档 34）
+    LOOSE_MIN_HITS = 3           # 宽松档最少命中数
+    LOOSE_MIN_GAP = 8            # 命中行间隔中位数下限：低于此判定为正文列表而非章节
+
+    def _scan_chapters(self):
+        """扫描全书章节标题行。offset 记录标题首字符在全文字符串中的偏移，
+        按 UTF-16 码元计数——与 JS 侧 textNode.length 同单位，前端用 Range
+        量像素时才能指哪打哪（星外字符会让 Python len() 少算一截）。
+
+        两档策略：严格档命中即信；宽松档（纯编号式）只在整本书通过
+        "命中数 + 间隔中位数" 校验时才启用，防止把正文里的
+        "1. 2. 3." 列表或 "一、二、三、" 递进句误认成目录。
+        一个都认不出时按 500 行一段生成伪目录（用户拍板的兜底方案）。"""
+        chapters = []
+        if self.content:
+            strict_idx = []   # 严格档命中的行号
+            loose_idx = []    # 宽松档命中的行号（不含严格档已命的）
+            strict_rows, loose_rows = [], []
+            for i, line in enumerate(self.content.split('\n')):
+                if len(line) <= 34 and self.CHAPTER_TITLE_RE.match(line):
+                    strict_idx.append(i)
+                    strict_rows.append(line)
+                elif len(line) <= self.LOOSE_LINE_MAX and self.CHAPTER_LOOSE_RE.match(line):
+                    loose_idx.append(i)
+                    loose_rows.append(line)
+                if len(strict_idx) + len(loose_idx) >= 3000:
+                    break  # 防御：超级长篇/正则误判爆炸时封顶
+            all_idx = sorted(strict_idx + loose_idx)
+            total = len(all_idx)
+            # 相邻命中行的间隔中位数：真章节至少隔几行；密集编号列表会远小于阈值
+            if total >= 2:
+                gaps = sorted(all_idx[i] - all_idx[i - 1] for i in range(1, total))
+                med_gap = gaps[len(gaps) // 2]
+            else:
+                med_gap = 0
+            if total >= self.LOOSE_MIN_HITS and med_gap >= self.LOOSE_MIN_GAP:
+                take = dict.fromkeys(all_idx)          # 合并去重、保序
+                loose_map = dict(zip(loose_idx, loose_rows))
+                strict_map = dict(zip(strict_idx, strict_rows))
+                # 重新按行号算偏移
+                offset = 0
+                lineno = 0
+                for line in self.content.split('\n'):
+                    if lineno in take:
+                        title = strict_map.get(lineno) or loose_map.get(lineno) or line
+                        chapters.append({'title': title, 'offset': offset})
+                    offset += len(line.encode('utf-16-le')) // 2 + 1
+                    lineno += 1
+                    if len(chapters) >= 3000:
+                        break
+            elif len(strict_idx) >= self.LOOSE_MIN_HITS:
+                chapters = [{'title': t, 'offset': o}
+                            for t, o in zip(strict_rows, self._line_offsets(strict_idx))]
+        if not chapters:
+            chapters = self._segment_chapters(500)
+        self.chapters = chapters
+
+    def _line_offsets(self, linenos):
+        """给定命中行号列表，返回各行起始的 UTF-16 字符偏移。"""
+        offsets = []
+        want = set(linenos)
+        offset = 0
+        for i, line in enumerate(self.content.split('\n')):
+            if i in want:
+                offsets.append(offset)
+            offset += len(line.encode('utf-16-le')) // 2 + 1
+        return offsets
+
+    def _segment_chapters(self, seg_lines):
+        """无章节标题可识别时：按固定行数切段，段首行做标题预览。"""
+        chapters = []
+        lines = self.content.split('\n')
+        starts = []
+        offset = 0
+        for line in lines:  # 预计算每行起始偏移（UTF-16 码元）
+            starts.append(offset)
+            offset += len(line.encode('utf-16-le')) // 2 + 1
+        for i in range(0, len(lines), seg_lines):
+            chunk = lines[i:i + seg_lines]
+            chapters.append({
+                'title': '第%d段（行%d-%d）· %s' % (
+                    len(chapters) + 1, i + 1, i + len(chunk), chunk[0][:16]),
+                'offset': starts[i],
+            })
+            if len(chapters) >= 3000:
+                break
+        return chapters
+
+    def get_chapters(self):
+        """目录面板数据：[{title, offset}]，offset 为全书 UTF-16 字符偏移"""
+        return {'chapters': self.chapters, 'count': len(self.chapters)}
+
+    def open_toc(self):
+        """打开目录：像设置面板一样临时撑大窗口（阅读窗可能只有一行高，
+        悬浮目录根本放不下），返回章节列表。"""
+        self.sense.suspend()  # 目录窗口打开期间暂停鼠标感应隐身
+        win = self._window
+        if self._reader_size is None:
+            self._reader_size = (win.x, win.y, win.width, win.height)
+        w, h = self.SETTINGS_SIZE
+        left, top, right, bottom = self._work_area()
+        x = max(left, min(win.x, right - w))
+        y = max(top, min(win.y, bottom - h))
+        try:
+            win.resize(w, h)
+            win.move(x, y)
+        except Exception:
+            pass  # 撑不动也不影响：Esc/点空白仍可退出目录
+        return {'chapters': self.chapters, 'count': len(self.chapters)}
+
+    def close_toc(self):
+        """关闭目录：恢复阅读窗口原尺寸与位置"""
+        self.sense.resume()
+        if self._reader_size is not None:
+            x, y, w, h = self._reader_size
+            try:
+                self._window.resize(w, h)
+                self._window.move(x, y)
+            except Exception:
+                pass
+            self._reader_size = None
 
     SETTINGS_SIZE = (420, 660)
 
@@ -219,7 +368,8 @@ class BookReader:
         return True
 
     def apply_settings(self, width, height, speed, mouse_sense=None,
-                       font_size=None, text_color=None, text_opacity=None):
+                       font_size=None, text_color=None, text_opacity=None,
+                       progress_bar=None):
         try:
             width, height, speed = int(width), int(height), int(speed)
             if not (150 <= width <= 1200 and 20 <= height <= 600 and 10 <= speed <= 200):
@@ -254,6 +404,10 @@ class BookReader:
                   'text_opacity': text_opacity}
         if mouse_sense is not None:
             config['mouse_sense'] = bool(mouse_sense)
+        if progress_bar is not None:
+            config['progress_bar'] = bool(progress_bar)
+        # 翻页模式没有设置面板表单入口，必须显式保留，否则保存一次设置就丢
+        config['auto_mode'] = bool(self.config.get('auto_mode', True))
         try:
             self.config_file.write_text(json.dumps(config, indent=4, ensure_ascii=False), encoding='utf-8')
         except OSError as error:
@@ -272,6 +426,15 @@ class BookReader:
             except Exception:
                 pass
         return {'success': True, 'config': config}
+
+    def set_auto_mode(self, enabled):
+        """持久化翻页模式（自动/手动）——toggleMode 切换时调用，下次打开书恢复"""
+        try:
+            self.config['auto_mode'] = bool(enabled)
+            self.config_file.write_text(json.dumps(self.config, indent=4, ensure_ascii=False), encoding='utf-8')
+        except OSError:
+            pass   # 落盘失败不阻断切换，下次打开退回默认
+        return {'success': True}
 
     @staticmethod
     def _decode_score(s):
@@ -342,30 +505,110 @@ class BookReader:
 
         self.content = '\n'.join(line.strip() for line in self.content.split('\n') if line.strip())
         self.current_file = file_path
+        self._scan_chapters()
         return True
 
     def load_epub(self, file_path):
-        """加载EPUB文件"""
+        """加载EPUB文件：按 spine（阅读顺序）拼接正文，并解析自带目录
+        （toc.ncx / nav.xhtml）。旧实现用 get_items() 的 manifest 顺序拼文本，
+        既可能乱序又丢掉了 epub 自带的目录层级，均已修正。"""
         try:
             book = epub.read_epub(file_path)
-            text_parts = []
 
-            for item in book.get_items():
-                if item.get_type() == ebooklib.ITEM_DOCUMENT:
-                    soup = BeautifulSoup(item.get_content(), 'html.parser')
-                    text = soup.get_text()
-                    text_parts.append(text)
+            # 1) 按 spine 顺序取正文文档
+            docs = []
+            for spine_item in book.spine:
+                idref = spine_item[0] if isinstance(spine_item, (tuple, list)) else spine_item
+                item = book.get_item_with_id(idref)
+                if item is not None and item.get_type() == ebooklib.ITEM_DOCUMENT:
+                    docs.append(BeautifulSoup(item.get_content(), 'html.parser'))
+            if not docs:  # 怪书没有 spine，回退 manifest 顺序
+                docs = [BeautifulSoup(it.get_content(), 'html.parser')
+                        for it in book.get_items() if it.get_type() == ebooklib.ITEM_DOCUMENT]
 
-            self.content = '\n'.join(text_parts)
-            self.content = '\n'.join(line.strip() for line in self.content.split('\n') if line.strip())
+            # 2) 拼全文，记录每篇文档起始的 UTF-16 字符偏移
+            parts = []
+            doc_starts = []
+            offset = 0
+            for soup in docs:
+                text = '\n'.join(line.strip() for line in soup.get_text().split('\n') if line.strip())
+                doc_starts.append(offset)
+                parts.append(text)
+                offset += len(text.encode('utf-16-le')) // 2 + 1
+            self.content = '\n'.join(parts)
             self.current_file = file_path
+
+            # 3) 目录：epub 自带目录优先；认不出再退回正则/分段
+            self.chapters = self._epub_toc_chapters(book, docs, doc_starts)
+            if not self.chapters:
+                self._scan_chapters()
             return True
-        except Exception as e:
+        except Exception:
             return False
+
+    @staticmethod
+    def _href_basename(href):
+        """取链接目标里的文件名（去 fragment、去目录路径、统一小写）。"""
+        if not href:
+            return ''
+        return href.split('#')[0].split('/')[-1].strip().lower()
+
+    def _epub_toc_chapters(self, book, docs, doc_starts):
+        """把 epub 自带目录（book.toc，Section/Link 树）映射成
+        [{title, offset}]。Link 按目标文件匹配到 spine 文档的起始偏移；
+        Section 只当层级缩进前缀。一篇文章一章的常见结构粒度足够。"""
+        # 文件名 -> spine 文档序号（docs 是 soup 没带 item 引用，从 book 侧重建）
+        name_to_index = {}
+        doc_i = 0
+        for spine_item in book.spine:
+            idref = spine_item[0] if isinstance(spine_item, (tuple, list)) else spine_item
+            item = book.get_item_with_id(idref)
+            if item is not None and item.get_type() == ebooklib.ITEM_DOCUMENT:
+                name_to_index[self._href_basename(item.get_name())] = doc_i
+                doc_i += 1
+
+        chapters = []
+
+        def walk(entries, depth):
+            for entry in entries or []:
+                if isinstance(entry, epub.Section):
+                    title = (entry.title or '').strip()
+                    if title and len(chapters) < 3000:
+                        chapters.append({'title': '　' * depth + title, 'offset': None})
+                    walk(getattr(entry, 'children', None) or [], depth + 1)
+                elif isinstance(entry, epub.Link):
+                    title = (entry.title or '').strip()
+                    if not title:
+                        continue
+                    doc_idx = name_to_index.get(self._href_basename(entry.href))
+                    if doc_idx is None:
+                        continue  # 指向非正文资源（样式表等），丢弃
+                    if len(chapters) >= 3000:
+                        break
+                    chapters.append({'title': '　' * depth + title,
+                                     'offset': doc_starts[doc_idx]})
+                elif isinstance(entry, (list, tuple)):
+                    walk(entry, depth)
+
+        try:
+            walk(book.toc, 0)
+        except Exception:
+            return []
+        # Section 条目 offset 还是 None：用它后面第一个有 offset 的条目补齐，
+        # 末尾没有的用全书末尾。这样点卷名也能跳到对应卷开头。
+        end_off = len(self.content.encode('utf-16-le')) // 2
+        next_off = end_off
+        for i in range(len(chapters) - 1, -1, -1):
+            if chapters[i]['offset'] is None:
+                chapters[i]['offset'] = next_off
+            else:
+                next_off = chapters[i]['offset']
+        return chapters
 
     def open_file(self):
         """打开文件对话框"""
-        file_types = ('Text Files (*.txt)', 'EPUB Files (*.epub)', 'All Files (*.*)')
+        # 默认筛选：txt+epub 一起显示（ epub 用户不用再手动切筛选 ）
+        file_types = ('Books (*.txt;*.epub)', 'Text Files (*.txt)', 'EPUB Files (*.epub)', 'All Files (*.*)')
         result = self._window.create_file_dialog(webview.FileDialog.OPEN, file_types=file_types)
 
         if result and len(result) > 0:
@@ -375,11 +618,11 @@ class BookReader:
             if ext == '.txt':
                 if self.load_txt(file_path):
                     saved_position = self.get_progress(file_path)
-                    return {'success': True, 'content': self.content, 'filename': Path(file_path).name, 'filepath': file_path, 'position': saved_position}
+                    return {'success': True, 'content': self.content, 'filename': Path(file_path).name, 'filepath': file_path, 'position': saved_position, 'auto_mode': bool(self.config.get('auto_mode', True))}
             elif ext == '.epub':
                 if self.load_epub(file_path):
                     saved_position = self.get_progress(file_path)
-                    return {'success': True, 'content': self.content, 'filename': Path(file_path).name, 'filepath': file_path, 'position': saved_position}
+                    return {'success': True, 'content': self.content, 'filename': Path(file_path).name, 'filepath': file_path, 'position': saved_position, 'auto_mode': bool(self.config.get('auto_mode', True))}
 
             return {'success': False, 'error': '不支持的文件格式'}
 
@@ -557,6 +800,21 @@ def enable_windows_transparency(window):
         extend_frame = ctypes.WinDLL('dwmapi').DwmExtendFrameIntoClientArea
         extend_frame.argtypes = [wintypes.HWND, ctypes.POINTER(Margins)]
         extend_frame.restype = ctypes.c_long
+
+        # Win11 深色模式下 DWM 会把玻璃区渲染成不透明深色（浅色模式则正常透明）。
+        # 双保险，须在扩展玻璃区之前设置：
+        # - 属性 20 (DWMWA_USE_IMMERSIVE_DARK_MODE) = FALSE：把窗口钉在浅色框架渲染
+        # - 属性 38 (DWMWA_SYSTEMBACKDROP_TYPE) = 1 (DWMSBT_NONE)：禁用 Mica 等系统材质
+        #   （Mica 本身不透明，深色主题下就是一层黑幕）
+        # Win10 不认识这些属性，返回错误码但不抛异常，静默忽略即可，不影响现有行为。
+        set_attr = ctypes.WinDLL('dwmapi').DwmSetWindowAttribute
+        set_attr.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+        set_attr.restype = ctypes.c_long
+        _dark_off = wintypes.BOOL(0)
+        _backdrop_none = wintypes.INT(1)
+        _hwnd = window.native.Handle.ToInt64()
+        set_attr(_hwnd, 20, ctypes.byref(_dark_off), ctypes.sizeof(_dark_off))
+        set_attr(_hwnd, 38, ctypes.byref(_backdrop_none), ctypes.sizeof(_backdrop_none))
 
         # Negative margins cover the entire client area, including future resizes.
         # A black host supplies zero-alpha pixels to DWM; WebView2 still draws text
@@ -780,6 +1038,97 @@ def get_html():
             transition: transform 0.1s linear;
         }
 
+        /* --- 底部进度条（默认关闭，body.progress-bar-on 时显示） --- */
+        #progress-bar {
+            display: none;               /* 默认隐匿；开关打开后由 body 类翻转为 flex */
+            height: 3px;
+            flex-shrink: 0;
+            background: rgba(180, 180, 180, 0.2);
+            cursor: pointer;
+            -webkit-app-region: no-drag;
+            position: relative;
+        }
+        body.progress-bar-on #progress-bar { display: flex; }
+        #progress-fill {
+            height: 100%;
+            width: 0%;
+            background: rgba(76, 175, 80, 0.5);
+            pointer-events: none;
+        }
+
+        /* --- v3.0: 迷你搜索条（Ctrl+F）与目录面板（Ctrl+T，复用设置撑窗机制） --- */
+        #search-bar {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 96px;             /* 右上角给控件面板留地盘 */
+            z-index: 1500;
+            padding: 3px 6px;
+            background: rgba(247, 247, 248, 0.95);
+            border: 1px solid #ccc;
+            border-top: none;
+            border-radius: 0 0 6px 6px;
+            font-size: 12px;
+            -webkit-app-region: no-drag;
+            align-items: center;
+            gap: 6px;
+        }
+        #search-bar.open { display: flex; }
+        #search-input {
+            flex: 1;
+            min-width: 36px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 2px 6px;
+            font-size: 12px;
+            user-select: text;
+        }
+        #search-count { color: #888; font-size: 11px; white-space: nowrap; }
+        #search-bar button { margin: 0; padding: 1px 8px; font-size: 11px; }
+
+        /* 目录：全屏覆盖式面板（窗口已由 Python 侧撑大到设置尺寸），
+           版式向设置面板看齐：浅灰底 + 居中白卡 */
+        #toc-panel {
+            position: fixed;
+            inset: 0;
+            z-index: 2000;
+            overflow: auto;
+            padding: 12px;
+            background: #f7f7f8;
+            color: #333;
+            -webkit-app-region: no-drag;
+        }
+        #toc-panel[hidden] { display: none; }
+        body.toc-open #container { visibility: hidden; }
+        body.toc-open #controls { display: none; }
+        #toc-card {
+            max-width: 380px;
+            margin: 0 auto;
+            padding: 14px 16px;
+            background: white;
+            border: 1px solid #e3e3e6;
+            border-radius: 8px;
+            box-shadow: 0 4px 14px rgba(0,0,0,0.08);
+        }
+        #toc-card h1 { font-size: 16px; margin: 0 0 6px; }
+        #toc-count { color: #888; font-size: 12px; font-weight: normal; margin-left: 6px; }
+        #toc-close { float: right; }
+        #toc-list { margin-top: 8px; }
+        .toc-item {
+            padding: 4px 8px;
+            cursor: pointer;
+            border-radius: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .toc-item:hover { background: #e8f0e8; color: #2c6e2f; }
+        .toc-empty { padding: 10px 2px; color: #888; }
+        /* 隐身/设置状态下把交互面板一并藏起来 */
+        body.sense-hidden #search-bar { display: none !important; }
+        body.settings-open #search-bar { display: none !important; }
+
         #controls {
             position: fixed;
             top: 0;
@@ -883,6 +1232,7 @@ def get_html():
             <div>
                 <button onclick="openFile()">打开</button>
                 <button id="settings-btn" onclick="openSettings()" title="Ctrl+,">设置</button>
+                <button onclick="openToc()" title="Ctrl+T">目录</button>
                 <button id="mode-btn" onclick="toggleMode()" class="active">自动</button>
                 <button id="pause-btn" onclick="togglePause()">暂停</button>
                 <button onclick="closeApp()">关闭</button>
@@ -895,7 +1245,26 @@ def get_html():
         <div id="text-display" onclick="togglePause()">
             <div id="text-content">右键点击打开电子书...</div>
         </div>
+        <div id="progress-bar" onclick="jumpToProgress(event)" title="点击跳转">
+            <div id="progress-fill"></div>
+        </div>
     </div>
+
+    <!-- v3.0: Ctrl+F 迷你搜索条 -->
+    <div id="search-bar">
+        <input id="search-input" type="text" placeholder="搜全书，Enter 下一处">
+        <span id="search-count">0/0</span>
+        <button type="button" onclick="gotoMatch(-1)" title="上一个 (Shift+Enter)">↑</button>
+        <button type="button" onclick="gotoMatch(1)" title="下一个 (Enter)">↓</button>
+    </div>
+    <!-- v3.0: Ctrl+T 目录面板（窗口由 Python 侧撑大后再显示） -->
+    <section id="toc-panel" hidden aria-label="目录">
+        <div id="toc-card">
+            <button type="button" id="toc-close" onclick="closeToc()" title="Esc 关闭">✕ 返回阅读</button>
+            <h1>目录<span id="toc-count"></span></h1>
+            <div id="toc-list"></div>
+        </div>
+    </section>
 
     <script>
         let content = '';
@@ -939,17 +1308,17 @@ def get_html():
                     if (currentPosition > contentHeight + displayHeight) {
                         currentPosition = -displayHeight;
                     }
+                    updateProgressBar();  // 考古版只在翻页时刷新，自动滚动时是根木桩——补上
                 }
 
                 scrollFrame = requestAnimationFrame(scroll);
             }
         }
 
-        function toggleMode() {
-            isAutoMode = !isAutoMode;
+        // 模式 UI 同步（toggleMode 和 openFile 恢复上次模式共用）
+        function syncModeUi(showIndicator) {
             const modeBtn = document.getElementById('mode-btn');
             const indicator = document.getElementById('mode-indicator');
-
             if (isAutoMode) {
                 modeBtn.textContent = '自动';
                 modeBtn.classList.add('active');
@@ -959,9 +1328,23 @@ def get_html():
                 modeBtn.classList.remove('active');
                 indicator.textContent = '手动翻页';
             }
+            if (showIndicator) {
+                indicator.classList.add('show');
+                setTimeout(() => indicator.classList.remove('show'), 1500);
+            }
+        }
 
-            indicator.classList.add('show');
-            setTimeout(() => indicator.classList.remove('show'), 1500);
+        function toggleMode() {
+            isAutoMode = !isAutoMode;
+            if (!isAutoMode && content) {
+                // 切回手动：自动滚动的任意像素位置对齐到行顶再开始翻页
+                currentPosition = lineFloor(currentPosition);
+                updatePagePosition();
+                snapTopToRealRow();
+            }
+            syncModeUi(true);
+            // 持久化模式选择，下次打开书恢复
+            pywebview.api.set_auto_mode(isAutoMode).catch(() => {});
         }
 
         // --- 行对齐分页的工具函数 ---
@@ -984,6 +1367,269 @@ def get_html():
             const lh = getLineHeight();
             return Math.max(0, Math.floor(y / lh) * lh);
         }
+        // v3.0 闭环校准：数学推算的翻页位置随阅读推进会有亚像素级漂移
+        // （emoji/生僻字撑高行盒、offsetHeight 取整、22.4px 小数行高…），
+        // 累积几十页后首行变半截。这里用 caretRangeFromPoint 实测"视口顶
+        // 首行"的真实行顶，把当前位置微调（≤半行）钉回真实行栅格——
+        // 误差每页清零，永不累积。实测失败时静默跳过，退化为原算术行为。
+        function snapTopToRealRow() {
+            const el = document.getElementById('text-content');
+            const display = document.getElementById('text-display');
+            // 关键：#text-content 有 transition: transform 0.1s——设置位置后
+            // 立即量测得到的是过渡起点（旧位置）的布局，全是失真值。
+            // 量测期间必须禁用过渡并强制同步布局，量完再恢复。
+            const prevTransition = el.style.transition;
+            el.style.transition = 'none';
+            updatePagePosition();  // 无过渡即时应用当前位置
+            try {
+                const dispTop = display.getBoundingClientRect().top;
+                const cx = Math.floor(display.getBoundingClientRect().width / 2);
+                let range = null;
+                for (const dy of [1, 3, 6]) {          // 视口顶往下试几个采样点
+                    try { range = document.caretRangeFromPoint(cx, dispTop + dy); } catch (err) {}
+                    if (range && range.startContainer) break;
+                }
+                if (!range || !range.startContainer) return;
+                // 圈住采样点的字符量行盒（collapsed range 的 rect 在部分内核不可靠）
+                let rect = null;
+                try {
+                    const node = range.startContainer;
+                    if (node.nodeType === 3 && range.startOffset < node.length) {
+                        // emoji 等星外字符占 2 个 UTF-16 码元：offset 落在代理对
+                        // 中间时 Range 量不出 rect，扩到完整字符
+                        let end = range.startOffset + 1;
+                        const cu = node.data.charCodeAt(range.startOffset);
+                        if (cu >= 0xD800 && cu <= 0xDBFF && end < node.length) end++;
+                        const r = document.createRange();
+                        r.setStart(node, range.startOffset);
+                        r.setEnd(node, end);
+                        rect = r.getClientRects()[0];
+                        if (!rect && end > range.startOffset + 1) {
+                            r.setEnd(node, range.startOffset);   // 收缩到起点再试
+                            rect = r.getClientRects()[0];
+                        }
+                    }
+                    if (!rect) rect = range.getClientRects()[0];
+                } catch (err) {}
+                if (!rect) return;
+                const rowTop = rect.top - dispTop;     // 首行顶相对视口顶的偏差
+                if (!isFinite(rowTop) || Math.abs(rowTop) < 0.5) return;   // 已对齐
+                if (Math.abs(rowTop) >= getLineHeight()) return;           // 异常值别动
+                if (currentPosition <= 0) return;      // 书顶是坐标原点，不校准
+                currentPosition = Math.max(0, currentPosition + rowTop);
+                updatePagePosition();
+            } finally {
+                el.style.transition = prevTransition;
+            }
+        }
+
+        // --- 进度条 + 统一跳转入口（进度条点击/百分比跳转/目录/搜索都走这里） ---
+        function setProgressBarVisible(on) {
+            document.body.classList.toggle('progress-bar-on', !!on);
+        }
+        function updateProgressBar() {
+            if (!content) return;
+            const maxScroll = Math.max(1, contentHeight() - viewHeight());
+            // 自动模式允许越界值（循环滚动时短暂为负/超界），钳到 0–100 显示
+            const pct = Math.min(100, Math.max(0, (currentPosition / maxScroll) * 100));
+            document.getElementById('progress-fill').style.width = pct + '%';
+        }
+        function jumpToPosition(pos) {
+            if (!content) return;
+            currentPosition = Math.max(0, Math.min(pos, Math.max(0, contentHeight() - viewHeight())));
+            if (!isAutoMode) {
+                currentPosition = lineFloor(currentPosition);  // 手动模式对齐行边界
+                updatePagePosition();                          // 先应用，实测才有意义
+                snapTopToRealRow();                            // 钉回真实行栅格（估算像素→实测像素）
+            }
+            updatePagePosition();
+            saveProgress();
+            updateProgressBar();
+        }
+        function jumpToProgress(event) {
+            if (!content) return;
+            const bar = document.getElementById('progress-bar');
+            const rect = bar.getBoundingClientRect();
+            const pct = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+            const maxScroll = Math.max(0, contentHeight() - viewHeight());
+            jumpToPosition(pct * maxScroll);
+        }
+        // 供设置面板的百分比跳转调用（0–100）
+        function jumpToPercent(pct) {
+            const maxScroll = Math.max(0, contentHeight() - viewHeight());
+            jumpToPosition((pct / 100) * maxScroll);
+        }
+
+        // --- v3.0: 字符偏移 → 像素换算（目录/搜索跳转的基建） ---
+        // 全文是 #text-content 里唯一一个文本节点；用 Range 量出"前 offset 个字符"
+        // 渲染到了哪里，返回相对内容顶部的 y（与 currentPosition 同坐标系）。
+        // offset 与 Python 端章节扫描同按 UTF-16 码元计，指哪打哪。
+        function charOffsetToY(offset) {
+            const el = document.getElementById('text-content');
+            const node = el.firstChild;
+            if (!node || node.nodeType !== 3 || !node.length) return 0;
+            const off = Math.max(0, Math.min(offset | 0, node.length));
+            if (off === 0) return 0;
+            const range = document.createRange();
+            range.setStart(node, 0);
+            range.setEnd(node, off);
+            const rects = range.getClientRects();
+            if (!rects.length) return 0;
+            // rects 是 translateY 变换后的视口坐标；减去内容自身顶部当前所在的
+            // 视口位置，才得到内容坐标系里的 y（才与 currentPosition 可比）
+            const elTop = el.getBoundingClientRect().top;
+            return rects[rects.length - 1].bottom - elTop;
+        }
+
+        function flashNote(text) {
+            const indicator = document.getElementById('mode-indicator');
+            indicator.textContent = text;
+            indicator.classList.add('show');
+            setTimeout(() => indicator.classList.remove('show'), 1500);
+        }
+
+        // --- v3.0: Ctrl+F 迷你搜索条 ---
+        let searchMatches = [];   // 全部命中处的字符偏移
+        let searchIndex = -1;     // 当前命中（-1 = 尚未跳转）
+        let searchWasPaused = false;
+        let searchToken = 0;      // 输入防抖令牌
+
+        function setSearchBarOpen(on) {
+            const bar = document.getElementById('search-bar');
+            const input = document.getElementById('search-input');
+            if (on) {
+                if (bar.classList.contains('open')) { input.focus(); return; }
+                closeToc();
+                searchWasPaused = isPaused;
+                if (!isPaused) togglePause();   // 打字时文字别再滚
+                bar.classList.add('open');
+                setTimeout(() => input.focus(), 0);
+            } else {
+                if (!bar.classList.contains('open')) return;
+                bar.classList.remove('open');
+                input.blur();
+                if (!searchWasPaused && isPaused) togglePause();
+            }
+        }
+        function closeSearch() { setSearchBarOpen(false); }
+
+        function runSearch(q) {
+            searchMatches = [];
+            searchIndex = -1;
+            const needle = (q || '').trim();
+            if (needle && content) {
+                let i = content.indexOf(needle);
+                while (i !== -1) {
+                    searchMatches.push(i);
+                    if (searchMatches.length >= 9999) break;  // 防御：超高频词封顶
+                    i = content.indexOf(needle, i + needle.length);
+                }
+            }
+            updateSearchCount();
+        }
+        function updateSearchCount() {
+            const total = searchMatches.length;
+            document.getElementById('search-count').textContent =
+                total ? ((searchIndex + 1) + '/' + total) : (content ? '0/0' : '无书');
+        }
+        function gotoMatch(step) {
+            const total = searchMatches.length;
+            if (!total) return;
+            if (searchIndex === -1) {
+                // 首跳：从当前阅读位置附近往后找第一个命中，找不到就回卷首
+                const approx = Math.floor(
+                    (currentPosition / Math.max(1, contentHeight())) * content.length);
+                searchIndex = 0;
+                while (searchIndex < total && searchMatches[searchIndex] < approx) searchIndex++;
+                if (searchIndex >= total) searchIndex = 0;
+            } else {
+                searchIndex = (searchIndex + step + total) % total;
+            }
+            // 命中行落在视口顶（摸鱼窗常常只有一两行高，留上下文会把命中顶出屏）
+            jumpToPosition(charOffsetToY(searchMatches[searchIndex]) - getLineHeight());
+            updateSearchCount();
+        }
+        document.getElementById('search-input').addEventListener('input', (e) => {
+            const token = ++searchToken;
+            setTimeout(() => { if (token === searchToken) runSearch(e.target.value); }, 200);
+        });
+        // 面板内按键不外泄（打字别触发翻页/模式切换），Esc/Enter 由自己处理
+        document.getElementById('search-input').addEventListener('keydown', (e) => {
+            e.stopPropagation();
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                closeSearch();
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                gotoMatch(e.shiftKey ? -1 : 1);
+            }
+        });
+
+        // --- v3.0: 目录面板（Ctrl+T / 控件面板"目录"按钮；复用设置撑窗机制） ---
+        // 阅读窗可能只有一行高，悬浮目录放不下：open_toc 由 Python 侧把窗口
+        // 临时撑大到设置尺寸，本面板全屏覆盖其上；close_toc 恢复原窗。
+        let tocWasPaused = false;
+        let tocBusy = false;
+
+        async function openToc() {
+            if (settingsOpen || tocBusy) return;
+            if (document.body.classList.contains('toc-open')) { closeToc(); return; }
+            if (!content) { flashNote('还没打开电子书'); return; }
+            tocBusy = true;
+            try {
+                closeSearch();
+                tocWasPaused = isPaused;
+                if (!isPaused) togglePause();
+                let data;
+                try {
+                    data = await pywebview.api.open_toc();
+                } catch (err) {
+                    data = { chapters: [] };
+                }
+                buildTocList((data && data.chapters) || []);
+                document.getElementById('toc-panel').hidden = false;
+                document.body.classList.add('toc-open');
+            } finally {
+                tocBusy = false;
+            }
+        }
+        async function closeToc() {
+            if (!document.body.classList.contains('toc-open')) return;
+            document.body.classList.remove('toc-open');
+            document.getElementById('toc-panel').hidden = true;
+            try { await pywebview.api.close_toc(); } catch (err) {}
+            if (!tocWasPaused && isPaused) togglePause();
+        }
+        function buildTocList(chapters) {
+            const list = document.getElementById('toc-list');
+            list.textContent = '';
+            document.getElementById('toc-count').textContent =
+                chapters.length ? '(' + chapters.length + ')' : '';
+            if (!chapters.length) {
+                const tip = document.createElement('div');
+                tip.className = 'toc-empty';
+                tip.textContent = '没认出章节标题（认"第X章/节/卷/回、序章、楔子、番外…"）';
+                list.appendChild(tip);
+                return;
+            }
+            for (const ch of chapters) {
+                const item = document.createElement('div');
+                item.className = 'toc-item';
+                item.textContent = ch.title;
+                item.title = ch.title;
+                item.onclick = async () => {
+                    // 先关目录恢复阅读窗（行宽变了换行会变），再量像素跳转
+                    await closeToc();
+                    // 标题行落在视口顶（负值由 jumpToPosition 钳位兜底）
+                    jumpToPosition(charOffsetToY(ch.offset) - getLineHeight());
+                };
+                list.appendChild(item);
+            }
+        }
+        // 点卡片外空白处返回阅读（与设置面板同款逃生口）
+        document.getElementById('toc-panel').addEventListener('click', (event) => {
+            if (event.target === document.getElementById('toc-panel')) closeToc();
+        });
 
         function togglePause() {
             senseResumePending = false;  // 任何手动/其他入口的暂停切换都取消待恢复
@@ -1011,7 +1657,9 @@ def get_html():
                 if (target >= currentPosition) target = currentPosition - lh;
                 currentPosition = Math.max(0, target);
                 updatePagePosition();
+                snapTopToRealRow();   // 闭环校准：必须先应用位置再实测，钉回真实行顶
                 saveProgress();
+                updateProgressBar();
             }
         }
 
@@ -1027,7 +1675,9 @@ def get_html():
                 if (target >= contentHeight()) return;
                 currentPosition = target;
                 updatePagePosition();
+                snapTopToRealRow();   // 闭环校准：必须先应用位置再实测，钉回真实行顶
                 saveProgress();
+                updateProgressBar();
             }
         }
 
@@ -1065,8 +1715,19 @@ def get_html():
                     currentFile = result.filename;
                     currentFilePath = result.filepath;
                     currentPosition = result.position || 0;
-                    isPaused = false;
+                    // 恢复上次使用的翻页模式（自动/手动），但一律暂停起步——
+                    // 不打开就开滚，避免"几秒钟滑走一大段"的狼狈（按空格/点继续才开滚）
+                    isAutoMode = (result.auto_mode !== undefined) ? !!result.auto_mode : true;
+                    isPaused = true;
                     lastTimestamp = 0;
+                    if (scrollFrame) { cancelAnimationFrame(scrollFrame); scrollFrame = 0; }
+                    document.getElementById('pause-btn').textContent = '继续';
+                    syncModeUi(false);
+                    searchMatches = [];    // 换书：搜索命中作废
+                    searchIndex = -1;
+                    updateSearchCount();
+                    closeSearch();
+                    closeToc();
 
                     document.getElementById('text-content').textContent = content;
                     // 手动模式：恢复进度时对齐到行边界——旧版本存的任意像素可能落在行中间，
@@ -1075,12 +1736,12 @@ def get_html():
                         currentPosition = lineFloor(currentPosition);
                     }
                     document.getElementById('text-content').style.transform = `translateY(-${currentPosition}px)`;
+                    if (!isAutoMode) {
+                        snapTopToRealRow();   // 钉回真实行顶（估算像素→实测像素）
+                    }
+                    updateProgressBar();
 
                     startAutoSave();
-
-                    if (isAutoMode) {
-                        startScroll();
-                    }
                 } else {
                     alert(result.error || '打开文件失败');
                 }
@@ -1102,10 +1763,7 @@ def get_html():
             if (e.ctrlKey && (e.key === 'h' || e.key === 'H')) {
                 e.preventDefault();
                 pywebview.api.sense_toggle().then(enabled => {
-                    const indicator = document.getElementById('mode-indicator');
-                    indicator.textContent = enabled ? '鼠标感应：开' : '鼠标感应：关';
-                    indicator.classList.add('show');
-                    setTimeout(() => indicator.classList.remove('show'), 1500);
+                    flashNote(enabled ? '鼠标感应：开' : '鼠标感应：关');
                 }).catch(() => {});
                 return;
             }
@@ -1114,6 +1772,30 @@ def get_html():
                     e.preventDefault();
                     closeSettings();
                 }
+                return;
+            }
+            // 面板优先级：目录 > 搜索条。开着时 Esc（或再按 Ctrl+T）关闭，
+            // 其余全局键（翻页/退出/再开别的面板）不响应
+            if (document.body.classList.contains('toc-open')) {
+                if (e.key === 'Escape' || (e.ctrlKey && (e.key === 't' || e.key === 'T'))) {
+                    e.preventDefault();
+                    closeToc();
+                }
+                return;
+            }
+            if (document.getElementById('search-bar').classList.contains('open')) {
+                if (e.key === 'Escape') { e.preventDefault(); closeSearch(); }
+                return;
+            }
+            // v3.0: Ctrl+F 搜索条 / Ctrl+T 目录
+            if (e.ctrlKey && (e.key === 'f' || e.key === 'F')) {
+                e.preventDefault();
+                setSearchBarOpen(true);
+                return;
+            }
+            if (e.ctrlKey && (e.key === 't' || e.key === 'T')) {
+                e.preventDefault();
+                openToc();
                 return;
             }
             if (e.key === 'Escape') {
@@ -1125,7 +1807,12 @@ def get_html():
                 pageUp();
             } else if (e.key === ' ' || e.key === 'Enter') {
                 e.preventDefault();
-                pageDown();
+                if (isAutoMode) {
+                    // 自动模式：空格=暂停/继续（打开书是暂停起步，空格开滚）
+                    togglePause();
+                } else {
+                    pageDown();
+                }
             } else if (e.key.length === 1 && /[a-zA-Z]/.test(e.key)) {
                 // Any single letter key = page down (looks like typing!)
                 // 'm' for mode toggle still works above, so it won't reach here
@@ -1175,7 +1862,9 @@ def get_html():
             // 仅真交互控件豁免（点击/滑杆自身要响应）；label、面板背景等照常可拖，
             // 与旧 easy_drag "任何位置可拖"行为保持一致——控件面板被 mouseenter 唤起
             // 覆盖在窗口上时，从其文字/空白处仍可拖动窗口
-            if (e.target.closest('button, input, select, textarea')) return;
+            // #progress-bar：点击是跳转语义；#search-bar/#toc-panel：交互面板，
+            // 点击/滑动是面板自身的事——均豁免拖窗
+            if (e.target.closest('button, input, select, textarea, #progress-bar, #search-bar, #toc-panel')) return;
             moyuDragId = e.pointerId;
             try { e.target.setPointerCapture(e.pointerId); } catch (err) {}
             moyuDragApi('drag_begin', e.screenX, e.screenY);
@@ -1247,7 +1936,9 @@ def get_html():
             if (!isAutoMode && content && !settingsOpen) {
                 currentPosition = lineFloor(currentPosition);
                 updatePagePosition();
+                snapTopToRealRow();   // 新行高下钉回真实行顶
             }
+            updateProgressBar();  // 视口变了，进度比例跟着变
         });
     </script>
     <!-- SETTINGS -->

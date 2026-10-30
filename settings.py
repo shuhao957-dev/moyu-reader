@@ -110,6 +110,29 @@ def get_settings_html():
             鼠标感应模式
         </label>
         <p class="check-hint">开启后：鼠标离开窗口 0.5 秒自动隐藏并暂停滚动，点击可穿透到下层窗口；鼠标移回即恢复。Ctrl+H 可随时开关。</p>
+        <label class="check-row" for="settings-progress-bar">
+            <input id="settings-progress-bar" type="checkbox">
+            显示底部进度条
+        </label>
+        <p class="check-hint">底部 3px 半透明细条，显示当前阅读位置，点击条上任意位置可跳转。</p>
+        <label for="settings-jump-pct">跳转到（全书百分比）</label>
+        <div class="inline-row">
+            <input id="settings-jump-pct" type="number" min="0" max="100" step="1" placeholder="0 – 100">
+            <button type="button" id="settings-jump-btn" onclick="doPercentJump()">跳转</button>
+        </div>
+        <p class="mini-hint">百分比按全书高度估算，配合底部进度条使用更直观。</p>
+        <details class="hotkeys">
+            <summary>快捷键速查</summary>
+            <ul>
+                <li><kbd>Ctrl+F</kbd> 搜索全书（Enter 下一处，Shift+Enter 上一处，Esc 关闭）</li>
+                <li><kbd>Ctrl+T</kbd> 打开目录，点章节直达（Esc 关闭）</li>
+                <li><kbd>Ctrl+,</kbd> 打开本设置面板</li>
+                <li><kbd>Ctrl+H</kbd> 鼠标感应模式开关</li>
+                <li><kbd>空格</kbd> / <kbd>Enter</kbd>：自动模式=暂停/继续滚动（打开书默认暂停起步，按空格开滚）；手动模式=下一页</li>
+                <li><kbd>任意字母键</kbd> / 方向键 / PageUp·Down：手动模式翻页</li>
+                <li><kbd>Esc</kbd> 关闭面板；无面板打开时退出阅读器</li>
+            </ul>
+        </details>
         <p id="settings-error" role="alert"></p>
         <div class="actions">
             <button type="button" id="settings-cancel" onclick="closeSettings()">取消</button>
@@ -142,6 +165,10 @@ def get_settings_html():
 
     async function openSettings() {
         if (settingsOpen || settingsBusy) return;
+        // 先关掉搜索条/目录（各自恢复暂停与窗口状态），避免两套记账打架；
+        // closeToc 涉及窗口恢复必须 await 完，否则撑窗尺寸互相踩
+        if (typeof closeSearch === 'function') closeSearch();
+        if (typeof closeToc === 'function') { try { await closeToc(); } catch (e) {} }
         settingsBusy = true;
         settingsOpen = true;
         settingsWasPaused = isPaused;
@@ -156,6 +183,7 @@ def get_settings_html():
             document.getElementById('settings-opacity').value = config.text_opacity || 100;
             document.getElementById('settings-opacity-val').textContent = (config.text_opacity || 100) + '%';
             document.getElementById('settings-mouse-sense').checked = !!config.mouse_sense;
+            document.getElementById('settings-progress-bar').checked = !!config.progress_bar;
             document.getElementById('settings-error').textContent = '';
             document.body.classList.add('settings-open');
             document.getElementById('moyu-settings').hidden = false;
@@ -174,9 +202,42 @@ def get_settings_html():
         document.getElementById('moyu-settings').hidden = true;
         document.body.classList.remove('settings-open');
         settingsOpen = false;
-        if (!isAutoMode && content) updatePageInfo();
+        if (!isAutoMode && content) {
+            // 字号可能已改（行高变了），页首重新对齐行边界。
+            // v2.1.7 分页重写删掉了 updatePageInfo，这里的旧调用其实是潜伏的
+            // ReferenceError，一直靠外层 catch 吞掉才没露馅——现在改为显式对齐
+            currentPosition = lineFloor(currentPosition);
+            updatePagePosition();
+            updateProgressBar();
+        }
         if (!settingsWasPaused && isPaused) togglePause();
     }
+
+    // 百分比跳转：关面板 → 回到阅读窗 → 跳（jumpToPercent 由主脚本提供）
+    async function doPercentJump() {
+        if (settingsBusy) return;
+        if (!content) {
+            document.getElementById('settings-error').textContent = '还没有打开电子书，跳不了。';
+            return;
+        }
+        const raw = document.getElementById('settings-jump-pct').value;
+        const v = Number(raw);
+        if (raw === '' || !(v >= 0 && v <= 100)) {
+            document.getElementById('settings-error').textContent = '百分比须为 0–100。';
+            document.getElementById('settings-jump-pct').focus();
+            return;
+        }
+        document.getElementById('settings-error').textContent = '';
+        await closeSettings();
+        jumpToPercent(v);
+    }
+    // 输入框里按回车 = 跳转（拦截隐式表单提交，防误触"保存并返回"）
+    document.getElementById('settings-jump-pct').addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            doPercentJump();
+        }
+    });
 
     async function closeSettings() {
         if (!settingsOpen || settingsBusy) return;
@@ -202,13 +263,15 @@ def get_settings_html():
                 document.getElementById('settings-mouse-sense').checked,
                 Number(document.getElementById('settings-font-size').value),
                 document.getElementById('settings-color').value,
-                Number(document.getElementById('settings-opacity').value)
+                Number(document.getElementById('settings-opacity').value),
+                document.getElementById('settings-progress-bar').checked
             );
             if (!result.success) {
                 document.getElementById('settings-error').textContent = result.message;
                 return;
             }
             changeSpeed(result.config.speed);
+            setProgressBarVisible(!!result.config.progress_bar);
             await finishSettings();
         } catch (error) {
             document.getElementById('settings-error').textContent = '保存失败：' + error;
@@ -221,6 +284,7 @@ def get_settings_html():
         const config = await pywebview.api.get_config();
         changeSpeed(config.speed);
         applyFontStyle(config.font_size || 14, config.text_color || '#333333', config.text_opacity || 100);
+        setProgressBarVisible(!!config.progress_bar);
     });
 </script>
     """
