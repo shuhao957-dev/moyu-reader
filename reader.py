@@ -7,11 +7,13 @@ import tempfile
 import threading
 import time
 import urllib.request
+import gzip
+import base64
 from pathlib import Path
 import json
 import ebooklib
 from ebooklib import epub
-from bs4 import BeautifulSoup
+from html import unescape as _html_unescape
 from settings import get_settings_html
 
 class BookReader:
@@ -37,6 +39,7 @@ class BookReader:
         'window': {'width': 400, 'height': 60, 'x': 100, 'y': 100},
         'speed': 50,
         'mouse_sense': False,
+        'hide_delay': 0.5,   # 鼠标感应模式：离开窗口多久后隐藏（秒），0=立刻
         'font_size': 14,
         'text_color': '#333333',
         'text_opacity': 100,
@@ -369,7 +372,7 @@ class BookReader:
 
     def apply_settings(self, width, height, speed, mouse_sense=None,
                        font_size=None, text_color=None, text_opacity=None,
-                       progress_bar=None):
+                       progress_bar=None, hide_delay=None):
         try:
             width, height, speed = int(width), int(height), int(speed)
             if not (150 <= width <= 1200 and 20 <= height <= 600 and 10 <= speed <= 200):
@@ -406,6 +409,14 @@ class BookReader:
             config['mouse_sense'] = bool(mouse_sense)
         if progress_bar is not None:
             config['progress_bar'] = bool(progress_bar)
+        if hide_delay is not None:
+            try:
+                _hd = float(hide_delay)
+            except (TypeError, ValueError):
+                _hd = None
+            if _hd is None or not (0 <= _hd <= 5):
+                return {'success': False, 'message': '离开隐藏延迟须为 0–5 秒（0=立刻）。'}
+            config['hide_delay'] = _hd
         # 翻页模式没有设置面板表单入口，必须显式保留，否则保存一次设置就丢
         config['auto_mode'] = bool(self.config.get('auto_mode', True))
         try:
@@ -418,6 +429,9 @@ class BookReader:
             self._reader_size = (*self._reader_size[:2], width, height)
         if mouse_sense is not None and bool(mouse_sense) != self.sense.enabled:
             self.sense.set_enabled(bool(mouse_sense))
+        # 隐藏延迟实时生效（无论 mouse_sense 是否改动）：下一个轮询周期即用新值
+        if hide_delay is not None and hasattr(self.sense, 'hide_delay'):
+            self.sense.hide_delay = config.get('hide_delay', 0.5)
         # 文字样式立即生效
         if self._window is not None:
             try:
@@ -508,10 +522,37 @@ class BookReader:
         self._scan_chapters()
         return True
 
+    _COMMENT_RE = re.compile(r'(?s)<!--.*?-->')
+    _HEAD_RE = re.compile(r'(?is)<head\b[^>]*>.*?</head\s*>')
+    _SCRIPT_STYLE_RE = re.compile(r'(?is)<(script|style)\b[^>]*>.*?</\1\s*>')
+    _BR_RE = re.compile(r'(?i)<br\s*/?>')
+    _BLOCK_END_RE = re.compile(
+        r'(?i)</(?:p|div|h[1-6]|li|blockquote|tr|section|article|pre)>')
+    _ANY_TAG_RE = re.compile(r'<[^>]+>')
+
+    @classmethod
+    def _xhtml_text(cls, raw):
+        """xhtml 字节快速提文本：大书 1000+ 篇文档时 BeautifulSoup 建树要近 3 秒，
+        正则通道 0.1 秒级且顺带剔掉 head/script/style（比 get_text 更干净）。"""
+        try:
+            text = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            text = raw.decode('gbk', 'ignore')
+        text = cls._COMMENT_RE.sub('', text)
+        text = cls._HEAD_RE.sub('', text)
+        text = cls._SCRIPT_STYLE_RE.sub('', text)
+        text = cls._BR_RE.sub('\n', text)
+        text = cls._BLOCK_END_RE.sub('\n', text)
+        text = cls._ANY_TAG_RE.sub('', text)
+        text = _html_unescape(text)
+        lines = [line.strip() for line in text.split('\n')]
+        return '\n'.join(line for line in lines if line)
+
     def load_epub(self, file_path):
         """加载EPUB文件：按 spine（阅读顺序）拼接正文，并解析自带目录
-        （toc.ncx / nav.xhtml）。旧实现用 get_items() 的 manifest 顺序拼文本，
-        既可能乱序又丢掉了 epub 自带的目录层级，均已修正。"""
+        （toc.ncx / nav.xhtml）。正文提取走正则快速通道（BS4 建千棵树太慢）；
+        旧实现用 get_items() 的 manifest 顺序拼文本，既可能乱序又丢掉了
+        epub 自带的目录层级，均已修正。"""
         try:
             book = epub.read_epub(file_path)
 
@@ -521,17 +562,17 @@ class BookReader:
                 idref = spine_item[0] if isinstance(spine_item, (tuple, list)) else spine_item
                 item = book.get_item_with_id(idref)
                 if item is not None and item.get_type() == ebooklib.ITEM_DOCUMENT:
-                    docs.append(BeautifulSoup(item.get_content(), 'html.parser'))
+                    docs.append(item)
             if not docs:  # 怪书没有 spine，回退 manifest 顺序
-                docs = [BeautifulSoup(it.get_content(), 'html.parser')
-                        for it in book.get_items() if it.get_type() == ebooklib.ITEM_DOCUMENT]
+                docs = [it for it in book.get_items()
+                        if it.get_type() == ebooklib.ITEM_DOCUMENT]
 
             # 2) 拼全文，记录每篇文档起始的 UTF-16 字符偏移
             parts = []
             doc_starts = []
             offset = 0
-            for soup in docs:
-                text = '\n'.join(line.strip() for line in soup.get_text().split('\n') if line.strip())
+            for item in docs:
+                text = self._xhtml_text(item.get_content())
                 doc_starts.append(offset)
                 parts.append(text)
                 offset += len(text.encode('utf-16-le')) // 2 + 1
@@ -605,6 +646,16 @@ class BookReader:
                 next_off = chapters[i]['offset']
         return chapters
 
+    def _pack_content(self):
+        """正文过桥打包：大文本走 gzip+base64。
+        pywebview 的 JSON 桥传 300 万+ 字要 6 秒（打开卡的大头），
+        中文文本 gzip 后约 1/3，前端 DecompressionStream 解码。"""
+        raw = self.content.encode('utf-8')
+        if len(raw) > 500 * 1024:
+            return {'content': base64.b64encode(gzip.compress(raw)).decode('ascii'),
+                    'compressed': True}
+        return {'content': self.content, 'compressed': False}
+
     def open_file(self):
         """打开文件对话框"""
         # 默认筛选：txt+epub 一起显示（ epub 用户不用再手动切筛选 ）
@@ -618,15 +669,23 @@ class BookReader:
             if ext == '.txt':
                 if self.load_txt(file_path):
                     saved_position = self.get_progress(file_path)
-                    return {'success': True, 'content': self.content, 'filename': Path(file_path).name, 'filepath': file_path, 'position': saved_position, 'auto_mode': bool(self.config.get('auto_mode', True))}
+                    packed = self._pack_content()
+                    return {'success': True, **packed, 'filename': Path(file_path).name, 'filepath': file_path, 'position': saved_position, 'auto_mode': bool(self.config.get('auto_mode', True))}
             elif ext == '.epub':
                 if self.load_epub(file_path):
                     saved_position = self.get_progress(file_path)
-                    return {'success': True, 'content': self.content, 'filename': Path(file_path).name, 'filepath': file_path, 'position': saved_position, 'auto_mode': bool(self.config.get('auto_mode', True))}
+                    packed = self._pack_content()
+                    return {'success': True, **packed, 'filename': Path(file_path).name, 'filepath': file_path, 'position': saved_position, 'auto_mode': bool(self.config.get('auto_mode', True))}
 
             return {'success': False, 'error': '不支持的文件格式'}
 
         return {'success': False, 'error': '未选择文件'}
+
+    def has_startup_file(self):
+        """是否有随程序启动打开的书：我们目前不支持，返回 False。
+        virtual.js 的 pywebviewready 会调用此方法；返回 False 即不自动开书，
+        保持现有"右键开书"行为，也避免该方法缺失导致 TypeError。"""
+        return False
 
 
 
@@ -831,6 +890,40 @@ def enable_windows_transparency(window):
         print('[摸鱼阅读器] 提示: 安装 .NET Desktop Runtime 可启用透明背景效果')
 
 
+def hide_from_taskbar(hwnd):
+    """让窗口不出现在任务栏与 Alt+Tab。
+    纯 ctypes，独立于透明背景，确保即便 .NET 不可用也生效。
+    关键点：pywebview 主窗体默认带 WS_EX_APPWINDOW(0x40000)，该标志会强制出现任务栏
+    按钮，光加 WS_EX_TOOLWINDOW 会被它盖过——必须显式清除 APPWINDOW 再加 TOOLWINDOW。
+    修改扩展样式后 SetWindowPos(SWP_FRAMECHANGED) 让系统重算任务栏按钮。
+    """
+    if sys.platform != 'win32' or not hwnd:
+        return
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        GWL_EXSTYLE = -20
+        WS_EX_TOOLWINDOW = 0x00000080
+        WS_EX_APPWINDOW = 0x00040000
+        GA_ROOT = 3
+        SWP_FRAMECHANGED = 0x0020
+        SWP_NOMOVE = 0x0002
+        SWP_NOSIZE = 0x0001
+        SWP_NOZORDER = 0x0004
+        hwnd = int(hwnd)
+        root = user32.GetAncestor(hwnd, GA_ROOT)
+        if root:
+            hwnd = root
+        ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        new_ex = (ex | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
+        if new_ex != ex:
+            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new_ex)
+            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED)
+    except Exception:
+        pass  # 任务栏隐藏失败不致命
+
+
 class MouseSenseController:
     """鼠标感应模式：鼠标在窗口内 = 正常显示；离开超过 0.5 秒 = 窗口淡出 + 暂停滚动 + 点击穿透。
 
@@ -842,7 +935,7 @@ class MouseSenseController:
     - 恢复滚动带 1 秒缓冲，防止鼠标路过窗口导致误触发。
     """
 
-    POLL_INTERVAL = 0.2
+    POLL_INTERVAL = 0.1
     HIDE_DELAY = 0.5
     RESUME_DELAY = 1.0
 
@@ -854,6 +947,10 @@ class MouseSenseController:
         self._suspended = False
         self._stop = threading.Event()
         self._thread = None
+        # 离开隐藏延迟（秒），从设置实时读取；0=立刻。
+        # 防御性 getattr：本控制器在 __init__ 中创建，早于 load_config()，
+        # 此时 reader.config 尚不存在，用 {} 兜底取默认，避免启动即崩。
+        self.hide_delay = float(getattr(reader, 'config', {}).get('hide_delay', 0.5))
 
     @property
     def enabled(self):
@@ -879,10 +976,12 @@ class MouseSenseController:
             self._stop.clear()
             self._thread = threading.Thread(target=self._loop, name='moyu-mouse-sense', daemon=True)
             self._thread.start()
+            self._eval_js('armCursorHide()')  # 前端：武装"停留藏光标"
         else:
             self._enabled = False
             self._suspended = False
             self._stop.set()
+            self._eval_js('disarmCursorHide()')  # 前端：解除武装并恢复光标
             t = self._thread
             self._thread = None
             if t is not None and t is not threading.current_thread():
@@ -944,6 +1043,8 @@ class MouseSenseController:
         resume_at = None
         while not self._stop.wait(self.POLL_INTERVAL):
             try:
+                # 实时读取最新设置（保存设置后无需重启即生效）
+                self.hide_delay = float(getattr(self.reader, 'config', {}).get('hide_delay', 0.5))
                 if self._suspended or not self._hwnd:
                     if hidden:
                         self._force_visible()
@@ -972,13 +1073,29 @@ class MouseSenseController:
                     resume_at = None
                     if out_since is None:
                         out_since = now
-                    elif not hidden and (now - out_since) >= self.HIDE_DELAY:
+                    if not hidden and (now - out_since) >= self.hide_delay:
                         # 离开超过宽限期：JS 淡出+暂停，再开点击穿透
                         self._eval_js('moyuSenseHide()')
                         self._set_click_through(True)
                         hidden = True
             except Exception:
                 continue  # 单次轮询异常不终止线程
+
+
+def load_virtual_js():
+    """读取 virtual.js（朋友的真·虚拟滚动渲染器）并以 <script> 注入页面。
+
+    运行时：与 reader.py 同目录；打包后：PyInstaller 解包目录 sys._MEIPASS。
+    该文件只含纯 JS，不含 Python 转义，规避三引号字符串吃掉 \\n/\\u 的坑。
+    """
+    import sys
+    base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+    p = os.path.join(base, 'virtual.js')
+    try:
+        with open(p, 'r', encoding='utf-8') as f:
+            return '<script>\n' + f.read() + '\n</script>'
+    except Exception:
+        return '<!-- virtual.js 未找到：渲染器降级为内置分块方案 -->'
 
 
 def get_html():
@@ -1012,13 +1129,15 @@ def get_html():
             display: flex;
             flex-direction: column;
             padding: 4px 8px;
-            transition: opacity 0.4s;
         }
 
         /* 鼠标感应模式：隐身时整体淡出，面板和模式指示完全消失 */
         body.sense-hidden #container { opacity: 0; }
         body.sense-hidden #controls { display: none !important; }
         body.sense-hidden #mode-indicator { display: none; }
+        /* 鼠标感应模式：光标在窗口内停留一段时间后隐藏（像控件面板一样），移动即恢复 */
+        /* 必须 !important 覆盖所有后代元素（文本块默认有 cursor），否则只藏容器本身、看字时光标仍在 */
+        #container.cursor-hidden, #container.cursor-hidden * { cursor: none !important; }
 
         #text-display {
             flex: 1;
@@ -1035,7 +1154,15 @@ def get_html():
             top: 0;
             left: 0;
             right: 0;
-            transition: transform 0.1s linear;
+            /* 无 transition：自动滚动靠 rAF 逐帧小步进天然平滑；
+               手动翻页/跳转瞬跳——0.1s 过渡 + snap 二次修正在大文本上会视觉颤抖 */
+        }
+        /* v3.1 分段渲染：正文按 500 行一块，屏外块跳过渲染（大书 353 万像素高
+           的单层会拖垮合成器）。intrinsic 尺寸由 JS 按行高刷新，auto 让渲染过
+           的块记住实际高度。 */
+        .content-block {
+            content-visibility: auto;
+            contain-intrinsic-size: auto 11200px;
         }
 
         /* --- 底部进度条（默认关闭，body.progress-bar-on 时显示） --- */
@@ -1373,21 +1500,19 @@ def get_html():
         // 首行"的真实行顶，把当前位置微调（≤半行）钉回真实行栅格——
         // 误差每页清零，永不累积。实测失败时静默跳过，退化为原算术行为。
         function snapTopToRealRow() {
-            const el = document.getElementById('text-content');
             const display = document.getElementById('text-display');
-            // 关键：#text-content 有 transition: transform 0.1s——设置位置后
-            // 立即量测得到的是过渡起点（旧位置）的布局，全是失真值。
-            // 量测期间必须禁用过渡并强制同步布局，量完再恢复。
-            const prevTransition = el.style.transition;
-            el.style.transition = 'none';
-            updatePagePosition();  // 无过渡即时应用当前位置
             try {
                 const dispTop = display.getBoundingClientRect().top;
                 const cx = Math.floor(display.getBoundingClientRect().width / 2);
                 let range = null;
-                for (const dy of [1, 3, 6]) {          // 视口顶往下试几个采样点
-                    try { range = document.caretRangeFromPoint(cx, dispTop + dy); } catch (err) {}
-                    if (range && range.startContainer) break;
+                for (const dy of [1, 3, 6]) {   // 视口顶往下试采样点
+                    // 分块渲染下，换书/换内容后的第一帧 hit-test 层未就绪会命中
+                    // 块 element（rects=0），必须命中 text node 才量得到字符行盒
+                    try {
+                        const r = document.caretRangeFromPoint(cx, dispTop + dy);
+                        if (r && r.startContainer && r.startContainer.nodeType === 3) { range = r; }
+                    } catch (err) {}
+                    if (range) break;
                 }
                 if (!range || !range.startContainer) return;
                 // 圈住采样点的字符量行盒（collapsed range 的 rect 在部分内核不可靠）
@@ -1418,9 +1543,7 @@ def get_html():
                 if (currentPosition <= 0) return;      // 书顶是坐标原点，不校准
                 currentPosition = Math.max(0, currentPosition + rowTop);
                 updatePagePosition();
-            } finally {
-                el.style.transition = prevTransition;
-            }
+            } catch (err) {}
         }
 
         // --- 进度条 + 统一跳转入口（进度条点击/百分比跳转/目录/搜索都走这里） ---
@@ -1460,25 +1583,98 @@ def get_html():
             jumpToPosition((pct / 100) * maxScroll);
         }
 
-        // --- v3.0: 字符偏移 → 像素换算（目录/搜索跳转的基建） ---
-        // 全文是 #text-content 里唯一一个文本节点；用 Range 量出"前 offset 个字符"
-        // 渲染到了哪里，返回相对内容顶部的 y（与 currentPosition 同坐标系）。
-        // offset 与 Python 端章节扫描同按 UTF-16 码元计，指哪打哪。
-        function charOffsetToY(offset) {
+        // --- v3.1: 分段渲染 + 字符偏移 → 像素换算（目录/搜索跳转的基建） ---
+        // 大书（300 万字）塞单 text node 会生成 350 万像素高的渲染层，拖垮合成器。
+        // 正文按 BLOCK_LINES 行分块 + content-visibility:auto，屏外块跳过渲染。
+        // offset 与 Python 端章节扫描同按 UTF-16 码元计。
+        const BLOCK_LINES = 500;
+        let lineStarts = null;   // 每行首字符的全文偏移（惰性建，换书置空）
+
+        function renderContent(text) {
             const el = document.getElementById('text-content');
-            const node = el.firstChild;
-            if (!node || node.nodeType !== 3 || !node.length) return 0;
-            const off = Math.max(0, Math.min(offset | 0, node.length));
-            if (off === 0) return 0;
-            const range = document.createRange();
-            range.setStart(node, 0);
-            range.setEnd(node, off);
-            const rects = range.getClientRects();
-            if (!rects.length) return 0;
-            // rects 是 translateY 变换后的视口坐标；减去内容自身顶部当前所在的
-            // 视口位置，才得到内容坐标系里的 y（才与 currentPosition 可比）
-            const elTop = el.getBoundingClientRect().top;
-            return rects[rects.length - 1].bottom - elTop;
+            el.textContent = '';
+            lineStarts = null;
+            const lines = text.split('\\n');
+            const lh = getLineHeight();
+            const frag = document.createDocumentFragment();
+            for (let i = 0; i < lines.length; i += BLOCK_LINES) {
+                const div = document.createElement('div');
+                div.className = 'content-block';
+                div.style.containIntrinsicSize = 'auto ' + Math.round(BLOCK_LINES * lh) + 'px';
+                div.textContent = lines.slice(i, i + BLOCK_LINES).join('\\n');
+                frag.appendChild(div);
+            }
+            el.appendChild(frag);
+        }
+
+        function ensureLineStarts() {
+            if (lineStarts) return lineStarts;
+            lineStarts = [0];
+            for (let i = 0; i < content.length - 1; i++) {
+                if (content.charCodeAt(i) === 10) lineStarts.push(i + 1);
+            }
+            return lineStarts;
+        }
+
+        function charOffsetToY(offset) {
+            if (!content) return 0;
+            const starts = ensureLineStarts();
+            // 二分找 offset 所在行
+            let lo = 0, hi = starts.length - 1;
+            const off = Math.max(0, Math.min(offset | 0, content.length));
+            while (lo < hi) {
+                const mid = (lo + hi + 1) >> 1;
+                if (starts[mid] <= off) lo = mid; else hi = mid - 1;
+            }
+            // 块按固定行数分组：块号 = 行号 / BLOCK_LINES。
+            // 块顶用 offsetTop（渲染过的块精确；屏外块按 intrinsic 估算累加），
+            // 块内用 行号×行高 算术——emoji 撑行误差由跳转后的 snap 落地校准兜底。
+            const blockNo = Math.floor(lo / BLOCK_LINES);
+            const blocks = document.getElementById('text-content').children;
+            const block = blocks[blockNo];
+            const blockTop = block ? block.offsetTop : 0;
+            return blockTop + (lo - blockNo * BLOCK_LINES) * getLineHeight();
+        }
+
+        // 精确版：目标块已渲染时用 Range 实测（折行/emoji 全自然处理）。
+        // 屏外块（content-visibility 跳过渲染）量不出 rect → 返回 null。
+        function charOffsetToYExact(offset) {
+            if (!content) return null;
+            const starts = ensureLineStarts();
+            let lo = 0, hi = starts.length - 1;
+            const off = Math.max(0, Math.min(offset | 0, content.length));
+            while (lo < hi) {
+                const mid = (lo + hi + 1) >> 1;
+                if (starts[mid] <= off) lo = mid; else hi = mid - 1;
+            }
+            const blockNo = Math.floor(lo / BLOCK_LINES);
+            const blocks = document.getElementById('text-content').children;
+            const block = blocks[blockNo];
+            if (!block || !block.firstChild || block.firstChild.nodeType !== 3) return null;
+            const node = block.firstChild;
+            const inBlock = off - starts[blockNo * BLOCK_LINES];
+            if (inBlock < 0 || inBlock > node.length) return null;
+            try {
+                const range = document.createRange();
+                range.setStart(node, 0);
+                range.setEnd(node, Math.max(1, inBlock));
+                const rects = range.getClientRects();
+                if (!rects.length) return null;
+                // rect 是 translateY 后的视口坐标：块内相对 = rect.bottom - 块顶视口位置
+                // （两个视口坐标相消，得到块内内容坐标 y），再加块顶 offsetTop
+                return block.offsetTop + (rects[rects.length - 1].bottom
+                                           - block.getBoundingClientRect().top);
+            } catch (err) { return null; }
+        }
+
+        // 两段式跳转（目录点击/搜索命中都走这里）：
+        // 先按估算落位（目标块因此进入渲染区），再用 Range 精确重测微调一次。
+        // contextLines = 目标行上方留几行上下文。
+        function jumpToCharOffset(offset, contextLines) {
+            const ctx = getLineHeight() * (contextLines || 0);
+            jumpToPosition(Math.max(0, charOffsetToY(offset) - ctx));
+            const exact = charOffsetToYExact(offset);
+            if (exact !== null) jumpToPosition(Math.max(0, exact - ctx));
         }
 
         function flashNote(text) {
@@ -1545,8 +1741,8 @@ def get_html():
             } else {
                 searchIndex = (searchIndex + step + total) % total;
             }
-            // 命中行落在视口顶（摸鱼窗常常只有一两行高，留上下文会把命中顶出屏）
-            jumpToPosition(charOffsetToY(searchMatches[searchIndex]) - getLineHeight());
+            // 命中行上方留一行上下文（与旧版一致；负值由 jumpToPosition 钳位兜底）
+            jumpToCharOffset(searchMatches[searchIndex], 1);
             updateSearchCount();
         }
         document.getElementById('search-input').addEventListener('input', (e) => {
@@ -1621,7 +1817,7 @@ def get_html():
                     // 先关目录恢复阅读窗（行宽变了换行会变），再量像素跳转
                     await closeToc();
                     // 标题行落在视口顶（负值由 jumpToPosition 钳位兜底）
-                    jumpToPosition(charOffsetToY(ch.offset) - getLineHeight());
+                    jumpToCharOffset(ch.offset, 1);
                 };
                 list.appendChild(item);
             }
@@ -1708,10 +1904,26 @@ def get_html():
             }, 5000);
         }
 
+        // 大文本过桥是 gzip+base64（省 2/3 传输），DecompressionStream 解码
+        async function unpackContent(result) {
+            if (!result.compressed) return result.content;
+            const bin = atob(result.content);
+            const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+            const buf = await new Response(stream).arrayBuffer();
+            return new TextDecoder('utf-8').decode(buf);
+        }
+
         function openFile() {
-            pywebview.api.open_file().then(result => {
+            pywebview.api.open_file().then(async result => {
                 if (result.success) {
-                    content = result.content;
+                    try {
+                        content = await unpackContent(result);
+                    } catch (err) {
+                        alert('打开文件出错（内容解码失败）：' + err);
+                        return;
+                    }
                     currentFile = result.filename;
                     currentFilePath = result.filepath;
                     currentPosition = result.position || 0;
@@ -1729,7 +1941,7 @@ def get_html():
                     closeSearch();
                     closeToc();
 
-                    document.getElementById('text-content').textContent = content;
+                    renderContent(content);
                     // 手动模式：恢复进度时对齐到行边界——旧版本存的任意像素可能落在行中间，
                     // floor 回退让首行完整重读（最多回退一行，绝不跳内容）；自动模式保持任意像素平滑续滚
                     if (!isAutoMode) {
@@ -1908,6 +2120,13 @@ def get_html():
             const a = Math.min(1, Math.max(0.2, (Number(opacity) || 100) / 100));
             document.body.style.fontSize = Number(size) + 'px';
             document.body.style.color = 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+            // v3.1 分块渲染：字号变了行高就变，未渲染块的 intrinsic 估算尺寸
+            // 会过期——按新行高刷新一遍（已渲染块的 auto 实际值不受影响）
+            const blocks = document.getElementById('text-content').children;
+            if (blocks.length) {
+                const sz = 'auto ' + Math.round(BLOCK_LINES * getLineHeight()) + 'px';
+                for (const blk of blocks) blk.style.containIntrinsicSize = sz;
+            }
         }
 
         // Controls auto-hide: show on window entry, fade out after 3s.
@@ -1931,6 +2150,32 @@ def get_html():
         });
         controlsEl.addEventListener('mouseleave', showControls);  // leaving panel: restart countdown
 
+        // 鼠标感应模式：光标在窗口内停留 3 秒无移动则隐藏本体，避免挡字；一动即恢复。
+        // 是否"武装"由后端 set_enabled 通过 armCursorHide/disarmCursorHide 同步，
+        // 不依赖前端读 pywebview.api.config（JS 桥只暴露方法、数据属性为 undefined）。
+        const containerEl = document.getElementById('container');
+        let cursorTimer = null;
+        let cursorHideArmed = false;
+        function armCursorHide() {
+            cursorHideArmed = true;
+            pokeCursor();
+        }
+        function disarmCursorHide() {
+            cursorHideArmed = false;
+            if (cursorTimer) { clearTimeout(cursorTimer); cursorTimer = null; }
+            containerEl.classList.remove('cursor-hidden');
+        }
+        function pokeCursor() {
+            containerEl.classList.remove('cursor-hidden');
+            if (cursorTimer) clearTimeout(cursorTimer);
+            if (cursorHideArmed) {
+                cursorTimer = setTimeout(() => containerEl.classList.add('cursor-hidden'), 3000);
+            }
+        }
+        containerEl.addEventListener('mousemove', pokeCursor);
+        containerEl.addEventListener('mouseenter', pokeCursor);
+        pokeCursor();
+
         window.addEventListener('resize', () => {
             // 窗口尺寸或字号变化会改变行高，当前页首可能落在行中间：重新对齐（floor 回退，不跳行）
             if (!isAutoMode && content && !settingsOpen) {
@@ -1942,9 +2187,10 @@ def get_html():
         });
     </script>
     <!-- SETTINGS -->
+    <!-- VIRTUAL_JS -->
 </body>
 </html>
-    """.replace('<!-- SETTINGS -->', get_settings_html())
+    """.replace('<!-- SETTINGS -->', get_settings_html()).replace('<!-- VIRTUAL_JS -->', load_virtual_js())
 
 
 def create_reader_window(api):
@@ -1972,6 +2218,7 @@ def create_reader_window(api):
     def _on_shown():
         window.resize(cfg['width'], cfg['height'])
         api.sense.attach(window)
+        hide_from_taskbar(window.native.Handle.ToInt64())
         if api.config.get('mouse_sense'):
             api.sense.set_enabled(True)
     window.events.shown += _on_shown

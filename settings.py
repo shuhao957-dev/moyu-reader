@@ -109,7 +109,15 @@ def get_settings_html():
             <input id="settings-mouse-sense" type="checkbox">
             鼠标感应模式
         </label>
-        <p class="check-hint">开启后：鼠标离开窗口 0.5 秒自动隐藏并暂停滚动，点击可穿透到下层窗口；鼠标移回即恢复。Ctrl+H 可随时开关。</p>
+        <p class="check-hint">开启后：鼠标离开窗口一段时间后自动隐藏并暂停滚动，点击可穿透到下层窗口；鼠标移回即恢复。Ctrl+H 可随时开关。</p>
+        <label for="settings-hide-delay">离开后隐藏延迟（秒，0=立刻）</label>
+        <input id="settings-hide-delay" type="number" min="0" max="5" step="0.1" value="0.5">
+        <div class="presets">
+            <button type="button" onclick="setSetting('hide-delay', 0)">立刻 · 0</button>
+            <button type="button" onclick="setSetting('hide-delay', 0.5)">默认 · 0.5</button>
+            <button type="button" onclick="setSetting('hide-delay', 2)">宽松 · 2</button>
+        </div>
+        <p class="mini-hint">环境越"水深火热"调越小，老板路过鼠标一走开就瞬隐。</p>
         <label class="check-row" for="settings-progress-bar">
             <input id="settings-progress-bar" type="checkbox">
             显示底部进度条
@@ -183,6 +191,7 @@ def get_settings_html():
             document.getElementById('settings-opacity').value = config.text_opacity || 100;
             document.getElementById('settings-opacity-val').textContent = (config.text_opacity || 100) + '%';
             document.getElementById('settings-mouse-sense').checked = !!config.mouse_sense;
+            setSetting('hide-delay', config.hide_delay != null ? config.hide_delay : 0.5);
             document.getElementById('settings-progress-bar').checked = !!config.progress_bar;
             document.getElementById('settings-error').textContent = '';
             document.body.classList.add('settings-open');
@@ -264,7 +273,8 @@ def get_settings_html():
                 Number(document.getElementById('settings-font-size').value),
                 document.getElementById('settings-color').value,
                 Number(document.getElementById('settings-opacity').value),
-                document.getElementById('settings-progress-bar').checked
+                document.getElementById('settings-progress-bar').checked,
+                Number(document.getElementById('settings-hide-delay').value)
             );
             if (!result.success) {
                 document.getElementById('settings-error').textContent = result.message;
