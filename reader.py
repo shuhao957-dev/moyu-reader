@@ -452,19 +452,49 @@ class BookReader:
 
     @staticmethod
     def _decode_score(s):
-        """给解码结果打分：常用字符（中文/中文标点/可打印ASCII）占比越高越好"""
+        """给解码结果打分：常用字符（中文/日文假名/韩文/中文标点/可打印ASCII）占比越高越好。
+        控制字符与 NUL 不计入分母——避免下载损坏文件拖在尾部的大段 \\x00 把正确解码的得分拖垮。"""
         if not s:
             return 0.0
         good = 0
+        denom = 0
         for ch in s:
             o = ord(ch)
+            # 控制字符 / NUL / 替换符：既不加分也不计入分母
+            if o < 0x20 and ch not in '\t\n\r':
+                continue
+            if o == 0xFFFD:
+                continue
+            denom += 1
             if (0x4E00 <= o <= 0x9FFF      # CJK 统一表意文字
-                    or 0x3000 <= o <= 0x303F  # 中文标点
+                    or 0x3400 <= o <= 0x4DBF  # CJK 扩展A
+                    or 0x3040 <= o <= 0x30FF  # 平假名 + 片假名
+                    or 0xAC00 <= o <= 0xD7A3  # 韩文谚文
+                    or 0x1100 <= o <= 0x11FF  # 韩文字母
+                    or 0x3000 <= o <= 0x303F  # 中文/日文标点
                     or 0xFF00 <= o <= 0xFFEF  # 全角字符
                     or 0x20 <= o <= 0x7E      # 可打印 ASCII
                     or ch in '\n\r\t'):
                 good += 1
-        return good / len(s)
+        return good / denom if denom else 0.0
+
+    @staticmethod
+    def _script_signal(s):
+        """返回文本中“日文假名 + 韩文”占（非控制）字符的比例。
+        正确解码的日/韩文文件该值明显 > 0；中文文件误解码成其他编码时接近 0——
+        用作近局择优选，避免把中文文件误判成日文。"""
+        if not s:
+            return 0.0
+        sig = 0
+        denom = 0
+        for ch in s:
+            o = ord(ch)
+            if o < 0x20 and ch not in '\t\n\r':
+                continue
+            denom += 1
+            if (0x3040 <= o <= 0x30FF) or (0xAC00 <= o <= 0xD7A3) or (0x1100 <= o <= 0x11FF):
+                sig += 1
+        return sig / denom if denom else 0.0
 
     def load_txt(self, file_path):
         """加载TXT文件，自动检测编码（BOM优先，支持UTF-16/UTF-8/GB18030）。
@@ -495,18 +525,30 @@ class BookReader:
             try:
                 content = raw.decode('utf-8')
             except UnicodeDecodeError:
-                # 3. 竞争打分：GB18030 / UTF-16LE / UTF-16BE 谁解出来更"像中文"用谁
-                best = None
-                for enc, data in (('gb18030', raw), ('utf-16-le', utf16_raw), ('utf-16-be', utf16_raw)):
+                # 3. 竞争打分：候选编码谁解出来更"像目标语言"用谁
+                # gb18030 放最前，保证纯中文文件优先（近局时胜出）；
+                # 候选扩到 cp932/euc-jp/big5，覆盖日/港台 legacy 编码；
+                # 近平局时若某候选含明显假名/谚文（正确日/韩文特征）则优先，避免中文被误判。
+                # 只采样前 20 万字符打分：大文件提速，且文件尾部的损坏垃圾不影响判定。
+                best = None  # (score, signal, text)
+                for enc, data in (('gb18030', raw), ('utf-16-le', utf16_raw),
+                                  ('utf-16-be', utf16_raw), ('cp932', raw),
+                                  ('euc-jp', raw), ('big5', raw)):
                     try:
                         text = data.decode(enc)
                     except UnicodeDecodeError:
                         continue
-                    score = self._decode_score(text)
-                    if best is None or score > best[0]:
-                        best = (score, text)
+                    sample = text[:200000]
+                    score = self._decode_score(sample)
+                    sig = self._script_signal(sample)
+                    if best is None:
+                        best = (score, sig, text)
+                    elif score > best[0] + 0.05:
+                        best = (score, sig, text)
+                    elif abs(score - best[0]) <= 0.05 and sig > best[1] + 0.03 and sig > 0.08:
+                        best = (score, sig, text)
                 if best is not None and best[0] > 0.6:
-                    content = best[1]
+                    content = best[2]
 
         # 4. 最终兜底（保证不抛异常）：有 BOM 就替换坏字符解码，否则忽略错误解码
         if content is None:
@@ -514,6 +556,11 @@ class BookReader:
                 content = bom_data.decode(bom_enc, errors='replace') if bom_enc else raw.decode('utf-8', errors='ignore')
             except (UnicodeDecodeError, ValueError):
                 content = raw.decode('utf-8', errors='ignore')
+
+        # 5. 清理下载/传输损坏常见的大段 NUL 填充（避免渲染豆腐块、白占内存）
+        #    ——正是“（全文完）之后拖 1.5MB \\x00”那种坏文件的元凶
+        if '\x00' in content:
+            content = ''.join(ch for ch in content if ord(ch) >= 0x20 or ch in '\t\n\r')
 
         self.content = content
 
