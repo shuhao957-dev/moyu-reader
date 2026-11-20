@@ -4,7 +4,12 @@
 
 ## 最近更新
 
-- **v3.2（当前版本）**
+- **v3.2.2（当前版本）**
+  - 新增 **Ctrl+B 一键隐藏/恢复右上角按键面板** —— 窗口开得很小时鼠标躲不开面板，按 Ctrl+B 让面板彻底让路（再按恢复），配合鼠标感应模式使用更顺手
+- **v3.2.1**
+  - 修复部分 TXT 文件（下载损坏、尾部拖大量空字节）打开后整本乱码的问题
+  - 增强编码识别：支持 Shift-JIS / EUC-JP / Big5，日韩文小说不再误判
+- **v3.2**
   - 鼠标感应模式下「离开窗口后隐藏延迟」可在设置里调节（0 = 鼠标一离开立刻消失）
   - 鼠标感应模式下光标停留 3 秒自动隐藏，不再挡字
   - 窗口在**任务栏和 Alt+Tab 里都不再显示**，降低暴露风险
@@ -24,14 +29,14 @@
 
 | 你的系统 | 推荐版本 | 说明 |
 |---|---|---|
-| Windows 10 / 11 | **[v3.2.1](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v3.2.1)（正式版）** | 功能最全、维护最活跃 |
+| Windows 10 / 11 | **[v3.2.2](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v3.2.2)（正式版）** | 功能最全、维护最活跃 |
 | Windows 7（尤其长期不更新 / 内网机） | [v2.1.6-win7](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1.6-win7)（兼容版） | 独立维护的老技术栈，安装指引和已知限制见 [win7 分支说明](https://github.com/shuhao957-dev/moyu-reader/tree/win7) |
 | macOS | 实验版 | [v2.1.6-mac](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v2.1.6-mac)（Apple Silicon 构建包，未经充分实测）；Intel Mac 需自行构建，见 [mac 分支](https://github.com/shuhao957-dev/moyu-reader/tree/mac) |
 
-**当前推荐版本：[v3.2](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v3.2)**
-（在 v3.0 基础上：更流畅的大文件渲染 + 鼠标感应隐藏细节打磨 + 任务栏/Alt+Tab 不显示，详见发布说明）
+**当前推荐版本：[v3.2.2](https://github.com/shuhao957-dev/moyu-reader/releases/tag/v3.2.2)**
+（在 v3.2.1 基础上：新增 Ctrl+B 一键隐藏按键面板；v3.2.1 修复损坏 TXT 整本乱码并增强中日韩编码识别，详见发布说明）
 
-**一般只需要下载 1 个文件：`MoyuReader_v3.2.exe`** — 主程序自带全部运行时，双击即用。
+**一般只需要下载 1 个文件：`MoyuReader_v3.2.2.exe`** — 主程序自带全部运行时，双击即用。
 
 另外 2 个文件是备用件，**只有运行 exe 弹出缺少运行时的提示时才需要下载**：
 - `MicrosoftEdgeWebview2Setup.exe` — WebView2 在线安装器（绝大多数 Win10/11 已自带，无需理会；完全无外网的电脑请改用微软官网的离线安装包）
@@ -68,6 +73,7 @@
 | Ctrl+T | 目录面板（点章节直达，Esc 关闭） |
 | Ctrl+, | 打开设置 |
 | Ctrl+H | 切换鼠标感应模式 |
+| Ctrl+B | 隐藏 / 恢复右上角按键面板（小窗口鼠标躲不开面板时的救星） |
 | ESC | 关闭面板；无面板打开时关闭程序 |
 
 自动模式下点击文字区域暂停/继续。
