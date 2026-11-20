@@ -136,6 +136,7 @@ def get_settings_html():
                 <li><kbd>Ctrl+T</kbd> 打开目录，点章节直达（Esc 关闭）</li>
                 <li><kbd>Ctrl+,</kbd> 打开本设置面板</li>
                 <li><kbd>Ctrl+H</kbd> 鼠标感应模式开关</li>
+                <li><kbd>Ctrl+B</kbd> 隐藏 / 恢复右上角按键面板（窗口很小时鼠标躲不开面板，用它在感应模式下让面板彻底让路）</li>
                 <li><kbd>空格</kbd> / <kbd>Enter</kbd>：自动模式=暂停/继续滚动（打开书默认暂停起步，按空格开滚）；手动模式=下一页</li>
                 <li><kbd>任意字母键</kbd> / 方向键 / PageUp·Down：手动模式翻页</li>
                 <li><kbd>Esc</kbd> 关闭面板；无面板打开时退出阅读器</li>

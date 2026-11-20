@@ -2026,6 +2026,11 @@ def get_html():
                 }).catch(() => {});
                 return;
             }
+            if (e.ctrlKey && (e.key === 'b' || e.key === 'B')) {
+                e.preventDefault();
+                toggleControlsLock();
+                return;
+            }
             if (settingsOpen) {
                 if (e.key === 'Escape') {
                     e.preventDefault();
@@ -2181,7 +2186,9 @@ def get_html():
         // only leaving the window and re-entering does.
         const controlsEl = document.getElementById('controls');
         let controlsTimer = null;
+        let controlsLocked = false;   // Ctrl+B 一键锁定隐藏：小窗口鼠标躲不开面板时的救星
         function showControls() {
+            if (controlsLocked) return;   // 锁定期：进窗/离开面板都不再唤起
             controlsEl.classList.add('show');
             if (controlsTimer) clearTimeout(controlsTimer);
             controlsTimer = setTimeout(() => controlsEl.classList.remove('show'), 3000);
@@ -2189,6 +2196,16 @@ def get_html():
         function hideControls() {
             if (controlsTimer) clearTimeout(controlsTimer);
             controlsEl.classList.remove('show');
+        }
+        function toggleControlsLock() {
+            controlsLocked = !controlsLocked;
+            if (controlsLocked) {
+                hideControls();
+                flashNote('按键面板已隐藏（Ctrl+B 恢复）');
+            } else {
+                showControls();
+                flashNote('按键面板已恢复');
+            }
         }
         document.getElementById('container').addEventListener('mouseenter', showControls);
         document.getElementById('container').addEventListener('mouseleave', hideControls);
